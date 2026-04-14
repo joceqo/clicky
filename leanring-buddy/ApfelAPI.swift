@@ -73,7 +73,7 @@ class ApfelAPI {
         let responseText = response.content
 
         let duration = Date().timeIntervalSince(startTime)
-        print("🍎 Apple Intelligence response: \(responseText.count) chars in \(String(format: "%.1f", duration))s")
+        print("🍎 Apple Intelligence response (\(responseText.count) chars, \(String(format: "%.1f", duration))s): \(responseText)")
         return (text: responseText, duration: duration)
         #else
         throw NSError(
