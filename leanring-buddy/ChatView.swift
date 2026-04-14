@@ -380,6 +380,13 @@ private struct ChatMessageBubbleView: View {
                         .fill(Color.white.opacity(0.06))
                 )
             }
+
+            // Response duration for assistant messages
+            if role == .assistant, let duration = message.responseDurationSeconds {
+                Text(formattedDuration(duration))
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary.opacity(0.7))
+            }
         }
     }
 
@@ -411,6 +418,16 @@ private struct ChatMessageBubbleView: View {
         case "local":             return "Local"
         case "lmstudio":         return "LM Studio"
         default:                  return modelID
+        }
+    }
+
+    private func formattedDuration(_ seconds: Double) -> String {
+        if seconds < 1 {
+            return String(format: "%.0fms", seconds * 1000)
+        } else if seconds < 10 {
+            return String(format: "%.1fs", seconds)
+        } else {
+            return String(format: "%.0fs", seconds)
         }
     }
 

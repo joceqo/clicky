@@ -510,8 +510,16 @@ final class CompanionManager: ObservableObject {
         guard conversationID != activeConversationID else { return }
         guard !isSendingChatMessage else { return }
 
-        // Save current conversation before switching away
-        saveActiveConversationToDisk()
+        // Save current conversation in the background so it doesn't block the
+        // switch. Capture the messages and ID before mutating state.
+        let previousMessages = chatMessages
+        let previousID = activeConversationID
+        if let previousID {
+            Task.detached(priority: .utility) { [conversationStore, conversations] in
+                conversationStore.saveMessages(previousMessages, for: previousID)
+                conversationStore.saveConversationsIndex(conversations)
+            }
+        }
 
         activeConversationID = conversationID
         chatMessages = conversationStore.loadMessages(for: conversationID)
@@ -1063,6 +1071,8 @@ final class CompanionManager: ObservableObject {
             defer { isSendingChatMessage = false }
 
             do {
+                let responseStartTime = Date()
+
                 let historyForAPI = conversationHistory.map { entry in
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
@@ -1082,10 +1092,13 @@ final class CompanionManager: ObservableObject {
                     }
                 )
 
+                let responseDuration = Date().timeIntervalSince(responseStartTime)
+
                 // Ensure the final content is set (the last onTextChunk may not have
                 // fired if the stream ended without a trailing chunk)
                 if let messageIndex = chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
                     chatMessages[messageIndex].content = fullResponseText
+                    chatMessages[messageIndex].responseDurationSeconds = responseDuration
                 }
 
                 // Share this exchange with the conversation history so future requests
@@ -1175,6 +1188,8 @@ final class CompanionManager: ObservableObject {
                     }
                     return transcript
                 }()
+
+                let voiceResponseStartTime = Date()
 
                 if isLocalModel {
                     // Local mode (Apple Intelligence): text-only, no screenshots, no pointing.
@@ -1374,7 +1389,8 @@ final class CompanionManager: ObservableObject {
                     foregroundAppBundleID: foregroundAppBundleID,
                     foregroundAppName: foregroundAppName
                 ))
-                chatMessages.append(ChatMessage(role: .assistant, content: spokenText, source: .voice, modelID: resolvedModelIDForMessages))
+                let voiceResponseDuration = Date().timeIntervalSince(voiceResponseStartTime)
+                chatMessages.append(ChatMessage(role: .assistant, content: spokenText, source: .voice, modelID: resolvedModelIDForMessages, responseDurationSeconds: voiceResponseDuration))
 
                 // Capture the active conversation ID now so the background screenshot
                 // save writes to the correct conversation even if the user switches

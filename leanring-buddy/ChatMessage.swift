@@ -58,6 +58,9 @@ struct ChatMessage: Identifiable, Codable {
     let foregroundAppBundleID: String?
     /// Display name of the frontmost app when the screenshot was taken.
     let foregroundAppName: String?
+    /// How long the model took to generate this response, in seconds.
+    /// `nil` for user messages and while still streaming. Set once streaming completes.
+    var responseDurationSeconds: Double?
 
     /// Standard init — generates a new UUID automatically.
     init(
@@ -68,7 +71,8 @@ struct ChatMessage: Identifiable, Codable {
         ocrText: String? = nil,
         screenshotFileNames: [String] = [],
         foregroundAppBundleID: String? = nil,
-        foregroundAppName: String? = nil
+        foregroundAppName: String? = nil,
+        responseDurationSeconds: Double? = nil
     ) {
         self.id = UUID()
         self.role = role
@@ -80,6 +84,7 @@ struct ChatMessage: Identifiable, Codable {
         self.screenshotFileNames = screenshotFileNames
         self.foregroundAppBundleID = foregroundAppBundleID
         self.foregroundAppName = foregroundAppName
+        self.responseDurationSeconds = responseDurationSeconds
     }
 
     /// Init with an explicit UUID — used when the ID must be known before
@@ -94,7 +99,8 @@ struct ChatMessage: Identifiable, Codable {
         ocrText: String? = nil,
         screenshotFileNames: [String] = [],
         foregroundAppBundleID: String? = nil,
-        foregroundAppName: String? = nil
+        foregroundAppName: String? = nil,
+        responseDurationSeconds: Double? = nil
     ) {
         self.id = id
         self.role = role
@@ -106,5 +112,6 @@ struct ChatMessage: Identifiable, Codable {
         self.screenshotFileNames = screenshotFileNames
         self.foregroundAppBundleID = foregroundAppBundleID
         self.foregroundAppName = foregroundAppName
+        self.responseDurationSeconds = responseDurationSeconds
     }
 }
