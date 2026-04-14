@@ -693,7 +693,8 @@ final class CompanionManager: ObservableObject {
                     you speak in a casual, friendly tone — short sentences, like talking to a friend. \
                     you don't have access to the user's screen in this mode, so just answer based on what they say. \
                     keep responses concise since they'll be spoken aloud. \
-                    always respond in the same language the user speaks to you in.
+                    CRITICAL: you MUST reply in the SAME language the user uses. if the user writes in French, \
+                    reply entirely in French. if in Spanish, reply in Spanish. match their language exactly.
                     """
 
                     let (responseText, _) = try await apfelAPI.chat(
