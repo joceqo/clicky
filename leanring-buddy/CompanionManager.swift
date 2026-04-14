@@ -109,6 +109,95 @@ final class CompanionManager: ObservableObject {
         return SupertonicTTSClient()
     }()
 
+    /// On-device LLM client via Apple Intelligence (FoundationModels).
+    /// Text-only, no vision. Requires macOS 26+.
+    private lazy var apfelAPI: ApfelAPI = {
+        return ApfelAPI()
+    }()
+
+    /// OpenAI-compatible API client for LM Studio (local vision models).
+    /// Talks to LM Studio's /v1/chat/completions endpoint at 127.0.0.1:1234.
+    private lazy var lmStudioAPI: OpenAIAPI = {
+        return OpenAIAPI(apiKey: lmStudioAPIKey, model: selectedLMStudioModel)
+    }()
+
+    /// Whether the selected model is the local on-device Apple Intelligence model.
+    var isLocalModel: Bool {
+        selectedModel == "local"
+    }
+
+    /// Whether the selected model is a local LM Studio model.
+    var isLMStudioModel: Bool {
+        selectedModel == "lmstudio"
+    }
+
+    /// Whether Apple Intelligence is available for local text-only mode.
+    var isAppleIntelligenceAvailable: Bool {
+        apfelAPI.isAvailable
+    }
+
+    // MARK: - LM Studio Configuration
+
+    /// User-provided LM Studio API key (optional — many local setups don't require one).
+    /// Persisted to UserDefaults so it survives app restarts.
+    @Published var lmStudioAPIKey: String = UserDefaults.standard.string(forKey: "lmStudioAPIKey") ?? ""
+
+    func setLMStudioAPIKey(_ key: String) {
+        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        lmStudioAPIKey = trimmedKey
+        UserDefaults.standard.set(trimmedKey, forKey: "lmStudioAPIKey")
+        lmStudioAPI.apiKey = trimmedKey
+    }
+
+    /// The model ID selected from LM Studio's available models.
+    /// Persisted separately from the Claude model selection.
+    @Published var selectedLMStudioModel: String = UserDefaults.standard.string(forKey: "selectedLMStudioModel") ?? ""
+
+    func setSelectedLMStudioModel(_ model: String) {
+        selectedLMStudioModel = model
+        UserDefaults.standard.set(model, forKey: "selectedLMStudioModel")
+        lmStudioAPI.model = model
+    }
+
+    /// Models discovered from LM Studio's /v1/models endpoint.
+    @Published var availableLMStudioModels: [String] = []
+
+    /// Queries LM Studio's local /v1/models endpoint and populates the model dropdown.
+    func fetchAvailableLMStudioModels() {
+        guard let url = URL(string: "http://127.0.0.1:1234/v1/models") else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        if !lmStudioAPIKey.isEmpty {
+            request.setValue("Bearer \(lmStudioAPIKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        Task {
+            do {
+                let (data, _) = try await URLSession.shared.data(for: request)
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let dataArray = json["data"] as? [[String: Any]] {
+                    var models = dataArray.compactMap { $0["id"] as? String }
+                        .filter { modelID in
+                            // Filter out SHA hashes (unloaded models) and speech tokenizer sub-models.
+                            // Readable model IDs contain a "/" (e.g. "google/gemma-4-e4b") or
+                            // a hyphen-separated name (e.g. "text-embedding-nomic-embed-text-v1.5").
+                            let looksLikeHash = modelID.range(of: "^[0-9a-f]{20,}$", options: .regularExpression) != nil
+                            let isSpeechTokenizer = modelID.contains("/speech_tokenizer")
+                            return !looksLikeHash && !isSpeechTokenizer
+                        }
+                    models.sort()
+                    self.availableLMStudioModels = models
+                    // Auto-select first model if none selected yet
+                    if selectedLMStudioModel.isEmpty, let firstModel = models.first {
+                        setSelectedLMStudioModel(firstModel)
+                    }
+                }
+            } catch {
+                print("Failed to fetch models from LM Studio: \(error)")
+            }
+        }
+    }
+
     /// Which TTS backend to use for voice responses. "elevenlabs" or "supertonic".
     /// Persisted to UserDefaults so the choice survives app restarts.
     @Published var selectedTTSProvider: String = UserDefaults.standard.string(forKey: "selectedTTSProvider") ?? "elevenlabs"
@@ -172,7 +261,10 @@ final class CompanionManager: ObservableObject {
     func setSelectedModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
-        claudeAPI.model = model
+        // Only update claudeAPI.model for actual Claude model IDs
+        if model != "local" && model != "lmstudio" {
+            claudeAPI.model = model
+        }
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -614,6 +706,7 @@ final class CompanionManager: ObservableObject {
     you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
+    - always respond in the same language the user spoke in. if they speak french, reply in french. if they speak english, reply in english. match their language exactly.
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
     - all lowercase, casual, warm. no emojis.
     - write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
@@ -661,33 +754,92 @@ final class CompanionManager: ObservableObject {
             voiceState = .processing
 
             do {
-                // Capture all connected screens so the AI has full context
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                let fullResponseText: String
+                var screenCaptures: [CompanionScreenCapture] = []
 
-                guard !Task.isCancelled else { return }
-
-                // Build image labels with the actual screenshot pixel dimensions
-                // so Claude's coordinate space matches the image it sees. We
-                // scale from screenshot pixels to display points ourselves.
-                let labeledImages = screenCaptures.map { capture in
-                    let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-                    return (data: capture.imageData, label: capture.label + dimensionInfo)
-                }
-
-                // Pass conversation history so Claude remembers prior exchanges
-                let historyForAPI = conversationHistory.map { entry in
-                    (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
-                }
-
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
-                    conversationHistory: historyForAPI,
-                    userPrompt: transcript,
-                    onTextChunk: { _ in
-                        // No streaming text display — spinner stays until TTS plays
+                if isLocalModel {
+                    // Local mode (Apple Intelligence): text-only, no screenshots, no pointing.
+                    // The on-device model has no vision capability, so we skip screen
+                    // capture entirely and just send the user's spoken transcript.
+                    let historyForAPI = conversationHistory.map { entry in
+                        (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                     }
-                )
+
+                    let localSystemPrompt = """
+                    you are clicky, a helpful voice assistant that lives in the user's menu bar on macOS. \
+                    you speak in a casual, friendly tone — short sentences, like talking to a friend. \
+                    you don't have access to the user's screen in this mode, so just answer based on what they say. \
+                    keep responses concise since they'll be spoken aloud. \
+                    CRITICAL: you MUST reply in the SAME language the user uses. if the user writes in French, \
+                    reply entirely in French. if in Spanish, reply in Spanish. match their language exactly.
+                    """
+
+                    let (responseText, _) = try await apfelAPI.chat(
+                        systemPrompt: localSystemPrompt,
+                        conversationHistory: historyForAPI,
+                        userPrompt: transcript
+                    )
+                    fullResponseText = responseText + " [POINT:none]"
+                } else if isLMStudioModel {
+                    // LM Studio mode: local vision model via OpenAI-compatible API.
+                    // Supports screenshots — LM Studio vision models can see the screen.
+                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+
+                    guard !Task.isCancelled else { return }
+
+                    let labeledImages = screenCaptures.map { capture in
+                        let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                        return (data: capture.imageData, label: capture.label + dimensionInfo)
+                    }
+
+                    let historyForAPI = conversationHistory.map { entry in
+                        (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+                    }
+
+                    let lmStudioStartTime = Date()
+                    let (responseText, _) = try await lmStudioAPI.analyzeImageStreaming(
+                        images: labeledImages,
+                        systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                        conversationHistory: historyForAPI,
+                        userPrompt: transcript,
+                        onTextChunk: { _ in
+                            // No streaming text display — spinner stays until TTS plays
+                        }
+                    )
+                    let lmStudioElapsed = Date().timeIntervalSince(lmStudioStartTime)
+                    print("⏱️ LM Studio response: \(String(format: "%.1f", lmStudioElapsed))s")
+                    print("💬 LM Studio text: \(responseText)")
+                    fullResponseText = responseText
+                } else {
+                    // Cloud mode (Claude): full vision pipeline with screenshots and pointing
+                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+
+                    guard !Task.isCancelled else { return }
+
+                    // Build image labels with the actual screenshot pixel dimensions
+                    // so Claude's coordinate space matches the image it sees. We
+                    // scale from screenshot pixels to display points ourselves.
+                    let labeledImages = screenCaptures.map { capture in
+                        let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                        return (data: capture.imageData, label: capture.label + dimensionInfo)
+                    }
+
+                    // Pass conversation history so Claude remembers prior exchanges
+                    let historyForAPI = conversationHistory.map { entry in
+                        (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+                    }
+
+                    let (responseText, _) = try await claudeAPI.analyzeImageStreaming(
+                        images: labeledImages,
+                        systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                        conversationHistory: historyForAPI,
+                        userPrompt: transcript,
+                        onTextChunk: { _ in
+                            // No streaming text display — spinner stays until TTS plays
+                        }
+                    )
+                    fullResponseText = responseText
+                }
 
                 guard !Task.isCancelled else { return }
 
@@ -706,6 +858,7 @@ final class CompanionManager: ObservableObject {
 
                 // Pick the screen capture matching Claude's screen number,
                 // falling back to the cursor screen if not specified.
+                // In local mode screenCaptures is empty so this returns nil.
                 let targetScreenCapture: CompanionScreenCapture? = {
                     if let screenNumber = parseResult.screenNumber,
                        screenNumber >= 1 && screenNumber <= screenCaptures.count {

@@ -2,7 +2,8 @@
 //  ParakeetTranscriptionProvider.swift
 //  leanring-buddy
 //
-//  On-device transcription using NVIDIA's Parakeet model via FluidAudio (CoreML).
+//  On-device transcription using NVIDIA's Parakeet v3 model via FluidAudio (CoreML).
+//  Supports 25 European languages with automatic language detection.
 //  Models auto-download on first use. No API key or internet connection required
 //  after the initial download. Runs on the Apple Neural Engine.
 //
@@ -143,14 +144,15 @@ private final class ParakeetTranscriptionSession: BuddyStreamingTranscriptionSes
     }
 
     /// Loads (or returns the cached) shared AsrManager, downloading models from
-    /// HuggingFace on first use. Uses v2 (English-only, fastest, ~600MB).
+    /// HuggingFace on first use. Uses v3 (25 European languages with auto
+    /// language detection, same 0.6B param size as v2).
     private func loadSharedAsrManagerIfNeeded() async throws -> AsrManager {
         if let existing = ParakeetTranscriptionProvider.sharedAsrManager {
             return existing
         }
 
         print("⬇️ Parakeet: downloading and loading models (first use)...")
-        let models = try await AsrModels.downloadAndLoad(version: .v2)
+        let models = try await AsrModels.downloadAndLoad(version: .v3)
         let manager = AsrManager(config: .default)
         try await manager.loadModels(models)
         ParakeetTranscriptionProvider.sharedAsrManager = manager
