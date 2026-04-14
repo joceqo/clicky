@@ -16,8 +16,6 @@ struct ChatSettingsView: View {
 
     @State private var apiKeyInput = ""
     @State private var isAPIKeyVisible = false
-    @State private var lmStudioAPIKeyInput = ""
-    @State private var isLMStudioAPIKeyVisible = false
 
     var body: some View {
         ScrollView(.vertical) {
@@ -25,12 +23,6 @@ struct ChatSettingsView: View {
                 modelSection
                 voiceSection
                 speechSection
-                if isAnthropicModelSelected {
-                    apiKeySection
-                }
-                if companionManager.selectedModel == "lmstudio" {
-                    lmStudioSection
-                }
             }
             .padding(24)
         }
@@ -45,9 +37,6 @@ struct ChatSettingsView: View {
             if companionManager.isUsingDirectAPIKey {
                 apiKeyInput = companionManager.anthropicAPIKey
             }
-            if !companionManager.lmStudioAPIKey.isEmpty {
-                lmStudioAPIKeyInput = companionManager.lmStudioAPIKey
-            }
             companionManager.fetchAvailableLMStudioModels()
         }
     }
@@ -57,10 +46,9 @@ struct ChatSettingsView: View {
     private var modelSection: some View {
         settingsSection(title: "Model") {
             HStack(spacing: 0) {
-                modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
-                modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
-                modelOptionButton(label: "LM Studio", modelID: "lmstudio")
-                modelOptionButton(label: "Apple", modelID: "local")
+                modelProviderOptionButton(label: "Anthropic", providerID: "anthropic")
+                modelProviderOptionButton(label: "LM Studio", providerID: "lmstudio")
+                modelProviderOptionButton(label: "Apple", providerID: "local")
             }
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -77,6 +65,25 @@ struct ChatSettingsView: View {
                 settingsHint("Requires macOS 26+ with Apple Intelligence enabled", isWarning: true)
             } else if companionManager.selectedModel == "local" {
                 settingsHint("Text-only \u{00B7} no screenshots \u{00B7} on-device")
+            }
+
+            if selectedModelProvider == "anthropic" {
+                HStack(spacing: 0) {
+                    anthropicModelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
+                    anthropicModelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
+
+                apiKeySection
+            } else if selectedModelProvider == "lmstudio" {
+                lmStudioSection
             }
         }
     }
@@ -95,13 +102,13 @@ struct ChatSettingsView: View {
         }
     }
 
-    private func modelOptionButton(label: String, modelID: String) -> some View {
-        let isSelected = companionManager.selectedModel == modelID
+    private func modelProviderOptionButton(label: String, providerID: String) -> some View {
+        let isSelected = selectedModelProvider == providerID
         return Button(action: {
-            companionManager.setSelectedModel(modelID)
+            setSelectedModelProvider(providerID)
         }) {
             HStack(spacing: 4) {
-                modelIcon(modelID)
+                modelProviderIcon(providerID)
                 Text(label)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
@@ -115,6 +122,70 @@ struct ChatSettingsView: View {
         }
         .buttonStyle(.plain)
         .pointerCursor()
+    }
+
+    @ViewBuilder
+    private func modelProviderIcon(_ providerID: String, size: CGFloat = 14) -> some View {
+        switch providerID {
+        case "anthropic":
+            Image("icon-anthropic").resizable().scaledToFit().frame(width: size, height: size)
+        case "lmstudio":
+            Image("icon-lmstudio").resizable().scaledToFit().frame(width: size, height: size)
+        case "local":
+            Image(systemName: "apple.logo").font(.system(size: size * 0.85))
+        default:
+            EmptyView()
+        }
+    }
+
+    private func anthropicModelOptionButton(label: String, modelID: String) -> some View {
+        let isSelected = companionManager.selectedModel == modelID
+        return Button(action: {
+            companionManager.setSelectedModel(modelID)
+        }) {
+            HStack(spacing: 4) {
+                modelIcon(modelID)
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    private var selectedModelProvider: String {
+        switch companionManager.selectedModel {
+        case "lmstudio":
+            return "lmstudio"
+        case "local":
+            return "local"
+        default:
+            return "anthropic"
+        }
+    }
+
+    private func setSelectedModelProvider(_ providerID: String) {
+        switch providerID {
+        case "anthropic":
+            if companionManager.selectedModel != "claude-opus-4-6" {
+                companionManager.setSelectedModel("claude-sonnet-4-6")
+            } else {
+                companionManager.setSelectedModel("claude-opus-4-6")
+            }
+        case "lmstudio":
+            companionManager.setSelectedModel("lmstudio")
+        case "local":
+            companionManager.setSelectedModel("local")
+        default:
+            break
+        }
     }
 
     // MARK: - Voice (TTS)
@@ -240,7 +311,11 @@ struct ChatSettingsView: View {
     // MARK: - API Key
 
     private var apiKeySection: some View {
-        settingsSection(title: "API Key") {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Anthropic API Key")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(DS.Colors.textSecondary)
+
             HStack {
                 if companionManager.isUsingDirectAPIKey {
                     HStack(spacing: 4) {
@@ -354,15 +429,14 @@ struct ChatSettingsView: View {
         }
     }
 
-    private var isAnthropicModelSelected: Bool {
-        let model = companionManager.selectedModel
-        return model != "lmstudio" && model != "local"
-    }
-
     // MARK: - LM Studio
 
     private var lmStudioSection: some View {
-        settingsSection(title: "LM Studio") {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("LM Studio")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(DS.Colors.textSecondary)
+
             HStack {
                 Spacer()
                 Button(action: { companionManager.fetchAvailableLMStudioModels() }) {

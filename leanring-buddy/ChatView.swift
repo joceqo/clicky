@@ -188,6 +188,7 @@ private struct SendButtonView: View {
 private struct ChatMessageBubbleView: View {
     let message: ChatMessage
     let conversationStore: ConversationStore
+    @State private var selectedScreenshotFileURL: URL? = nil
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 6) {
@@ -231,11 +232,31 @@ private struct ChatMessageBubbleView: View {
     private var screenshotThumbnailStrip: some View {
         HStack(spacing: 6) {
             ForEach(message.screenshotFileNames, id: \.self) { fileName in
+                let screenshotFileURL = conversationStore.screenshotFileURL(fileName: fileName)
                 ScreenshotThumbnailView(
-                    fileURL: conversationStore.screenshotFileURL(fileName: fileName)
+                    fileURL: screenshotFileURL,
+                    onTapThumbnail: {
+                        selectedScreenshotFileURL = screenshotFileURL
+                    }
                 )
             }
         }
+        .sheet(isPresented: isScreenshotDetailPresentedBinding) {
+            if let selectedScreenshotFileURL {
+                ScreenshotDetailView(fileURL: selectedScreenshotFileURL)
+            }
+        }
+    }
+
+    private var isScreenshotDetailPresentedBinding: Binding<Bool> {
+        Binding(
+            get: { selectedScreenshotFileURL != nil },
+            set: { isPresented in
+                if !isPresented {
+                    selectedScreenshotFileURL = nil
+                }
+            }
+        )
     }
 
     // MARK: Assistant bubble
@@ -382,29 +403,46 @@ private struct ChatMessageBubbleView: View {
 /// Shows a neutral placeholder while the image is loading or if the file is missing.
 private struct ScreenshotThumbnailView: View {
     let fileURL: URL
+    let onTapThumbnail: () -> Void
 
     @State private var thumbnailImage: NSImage? = nil
+    @State private var isHoveringThumbnail = false
 
     private let thumbnailHeight: CGFloat = 90
 
     var body: some View {
-        Group {
-            if let image = thumbnailImage {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(height: thumbnailHeight)
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
+        Button(action: onTapThumbnail) {
+            Group {
+                if let image = thumbnailImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(height: thumbnailHeight)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
+                } else {
+                    // Placeholder shown while the image loads or if the file is missing
+                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
+                        .fill(DS.Colors.surface3)
+                        .frame(height: thumbnailHeight)
+                        .overlay(
+                            Image(systemName: "photo")
+                                .foregroundColor(DS.Colors.textTertiary)
+                        )
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
+                .stroke(DS.Colors.borderSubtle.opacity(isHoveringThumbnail ? 1 : 0), lineWidth: 1)
+        )
+        .onHover { hovering in
+            isHoveringThumbnail = hovering
+            if hovering {
+                NSCursor.pointingHand.push()
             } else {
-                // Placeholder shown while the image loads or if the file is missing
-                RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
-                    .fill(DS.Colors.surface3)
-                    .frame(height: thumbnailHeight)
-                    .overlay(
-                        Image(systemName: "photo")
-                            .foregroundColor(DS.Colors.textTertiary)
-                    )
+                NSCursor.pop()
             }
         }
         .onAppear { loadThumbnail() }
@@ -418,6 +456,74 @@ private struct ScreenshotThumbnailView: View {
         Task.detached(priority: .utility) {
             let image = NSImage(contentsOf: url)
             await MainActor.run { thumbnailImage = image }
+        }
+    }
+}
+
+// MARK: - Screenshot Detail View
+
+/// Larger screenshot preview shown when a chat thumbnail is clicked.
+private struct ScreenshotDetailView: View {
+    let fileURL: URL
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var detailImage: NSImage? = nil
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+            }
+
+            Group {
+                if let detailImage {
+                    GeometryReader { geometryProxy in
+                        Image(nsImage: detailImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(
+                                width: geometryProxy.size.width,
+                                height: geometryProxy.size.height,
+                                alignment: .center
+                            )
+                    }
+                    .padding(8)
+                    .background(DS.Colors.surface1)
+                    .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.large))
+                } else {
+                    ProgressView()
+                        .tint(DS.Colors.textSecondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 980, minHeight: 620)
+        .background(DS.Colors.background)
+        .onAppear { loadDetailImage() }
+        .onChange(of: fileURL) { _ in loadDetailImage() }
+    }
+
+    private func loadDetailImage() {
+        let currentFileURL = fileURL
+        Task.detached(priority: .utility) {
+            let loadedImage = NSImage(contentsOf: currentFileURL)
+            await MainActor.run {
+                detailImage = loadedImage
+            }
         }
     }
 }
