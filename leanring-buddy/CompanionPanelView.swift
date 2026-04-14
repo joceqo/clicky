@@ -618,26 +618,28 @@ struct CompanionPanelView: View {
     // MARK: - Model Picker
 
     private var modelPickerRow: some View {
-        HStack {
-            Text("Model")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
+        VStack(spacing: 6) {
+            HStack {
+                Text("Model")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
 
-            Spacer()
+                Spacer()
 
-            HStack(spacing: 0) {
-                modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
-                modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
-                modelOptionButton(label: "Local", modelID: "local")
+                HStack(spacing: 0) {
+                    modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
+                    modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                    modelOptionButton(label: "Local", modelID: "local")
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
             }
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-            )
 
             if companionManager.selectedModel == "local" && !companionManager.isAppleIntelligenceAvailable {
                 Text("Requires macOS 26+ with Apple Intelligence enabled")
