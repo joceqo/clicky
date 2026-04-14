@@ -778,11 +778,22 @@ final class CompanionManager: ObservableObject {
                 // alongside the screenshot.
                 var extractedScreenText: String? = nil
                 if isOCRExtractionEnabled && (isLocalModel || isLMStudioModel) {
-                    if let extractionResult = try? await TextExtractor().extract() {
-                        let trimmedText = extractionResult.fullText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmedText.isEmpty {
-                            extractedScreenText = trimmedText
-                            print("📄 OCR extracted \(trimmedText.count) chars via \(extractionResult.source)")
+                    // Try OCR extraction with one retry. The Vision/Accessibility
+                    // frameworks can fail with "fopen failed for data file" right
+                    // after app launch before their caches are warm.
+                    for ocrAttempt in 1...2 {
+                        if let extractionResult = try? await TextExtractor().extract() {
+                            let trimmedText = extractionResult.fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmedText.isEmpty {
+                                extractedScreenText = trimmedText
+                                print("📄 OCR extracted \(trimmedText.count) chars via \(extractionResult.source)")
+                                print("📄 OCR text:\n\(trimmedText)")
+                                break
+                            }
+                        }
+                        if ocrAttempt == 1 {
+                            print("📄 OCR extraction failed, retrying after brief delay...")
+                            try await Task.sleep(nanoseconds: 300_000_000) // 300ms
                         }
                     }
                 }
@@ -813,7 +824,9 @@ final class CompanionManager: ObservableObject {
                         localSystemPrompt = """
                         you are clicky, a helpful voice assistant that lives in the user's menu bar on macOS. \
                         you speak in a casual, friendly tone — short sentences, like talking to a friend. \
-                        you have been given the text extracted from the user's screen — use it to give a relevant answer. \
+                        you CAN see the user's screen. the text content of their screen has been extracted and \
+                        included below the user's question — this IS what's on their screen right now. treat it \
+                        as your vision. when the user asks about what's on screen, answer based on that text. \
                         keep responses concise since they'll be spoken aloud. \
                         CRITICAL: you MUST reply in the SAME language the user uses. if the user writes in French, \
                         reply entirely in French. if in Spanish, reply in Spanish. match their language exactly.

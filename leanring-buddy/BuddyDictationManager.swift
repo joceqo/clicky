@@ -263,7 +263,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     }
 
     private var transcriptionProvider: any BuddyTranscriptionProvider
-    private let audioEngine = AVAudioEngine()
+    private var audioEngine = AVAudioEngine()
     private var activeTranscriptionSession: (any BuddyStreamingTranscriptionSession)?
     private var activeStartSource: BuddyDictationStartSource?
     private var draftCallbacks: BuddyDictationDraftCallbacks?
@@ -559,15 +559,17 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         self.activeTranscriptionSession = activeTranscriptionSession
         print("🎙️ BuddyDictationManager: provider ready, starting audio engine")
 
+        // Create a fresh AVAudioEngine each session so the inputNode picks up the
+        // current hardware sample rate. Supertonic TTS plays at 24kHz through its
+        // own engine, which can cause macOS to switch the hardware input rate from
+        // 48kHz to 24kHz. A long-lived engine caches the old format internally and
+        // installTap(format: nil) resolves to the stale rate → format mismatch
+        // error -10868. A new engine has no cached state and reads the live rate.
+        audioEngine = AVAudioEngine()
+
         let inputNode = audioEngine.inputNode
 
         inputNode.removeTap(onBus: 0)
-        // Pass nil for the format so AVAudioEngine delivers buffers in the
-        // input node's native hardware format. Explicitly requesting a format
-        // can fail with a format mismatch (-10877) when the hardware sample rate
-        // (e.g. 96kHz) differs from a stale cached format after an aggregate
-        // device rebuild. Downstream converters (BuddyPCM16AudioConverter)
-        // already resample to the target rate, so the tap format doesn't matter.
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             self?.activeTranscriptionSession?.appendAudioBuffer(buffer)
             self?.updateAudioPowerLevel(from: buffer)

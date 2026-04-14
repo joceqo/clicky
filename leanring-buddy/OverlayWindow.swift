@@ -329,6 +329,23 @@ struct BlueCursorView: View {
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
 
+            // "listening..." label — shown below the waveform while recording
+            if companionManager.voiceState == .listening && buddyIsVisibleOnThisScreen {
+                Text("listening...")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.7))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule()
+                            .fill(DS.Colors.overlayCursorBlue.opacity(0.6))
+                    )
+                    .opacity(cursorOpacity)
+                    .position(x: cursorPosition.x, y: cursorPosition.y + 20)
+                    .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                    .transition(.opacity)
+            }
+
             // Blue spinner — shown while the AI is processing (transcription + Claude + waiting for TTS)
             BlueCursorSpinnerView()
                 .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .processing ? cursorOpacity : 0)
