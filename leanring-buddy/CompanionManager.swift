@@ -269,6 +269,16 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
+    /// All messages in the Clicky chat window, ordered oldest-first.
+    /// Includes both voice (push-to-talk) and text (typed) exchanges so the
+    /// chat window shows the full session history regardless of input method.
+    @Published var chatMessages: [ChatMessage] = []
+
+    /// True while a text-chat message is being sent and Claude is streaming a
+    /// response. Used by ChatView to disable the send button and show the
+    /// typing indicator.
+    @Published private(set) var isSendingChatMessage: Bool = false
+
     /// The Claude model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
 
@@ -752,6 +762,99 @@ final class CompanionManager: ObservableObject {
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
 
+    /// System prompt for text-chat mode (chat window).
+    /// Unlike the voice prompt, this allows longer responses, encourages markdown
+    /// formatting, and omits the POINT tag instructions (no cursor overlay in chat).
+    private static let companionChatSystemPrompt = """
+    you're clicky, a friendly always-on companion that lives in the user's menu bar. \
+    the user is chatting with you via text in the clicky chat window. \
+    this is an ongoing conversation — you remember everything said before in this session, \
+    including any voice exchanges the user had earlier.
+
+    rules:
+    - always respond in the same language the user writes in. if they write in french, reply in french.
+    - you can give longer, more detailed responses than in voice mode — text doesn't have a length penalty.
+    - use markdown formatting when it helps: **bold** for emphasis, `code` for inline code, \
+    ```language blocks for multi-line code, bullet lists for steps. don't over-format casual replies.
+    - be direct and clear. avoid filler phrases like "certainly!" or "great question!".
+    - never say "simply" or "just".
+    - you can help with anything — coding, writing, analysis, general knowledge, brainstorming.
+    - don't end with a yes/no question like "want me to explain more?" — those are dead ends. \
+    if it fits, mention something bigger they could explore next.
+    """
+
+    // MARK: - Text Chat Pipeline
+
+    /// Sends a typed message from the chat window to Claude and streams the response
+    /// in-place into chatMessages. Unlike the voice pipeline, this does not use TTS,
+    /// does not capture a screenshot, and does not trigger cursor pointing — it's a
+    /// pure text exchange that shares the same conversation history as voice mode.
+    func sendChatTextMessage(_ userText: String) {
+        guard !userText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        let userMessage = ChatMessage(role: .user, content: userText, source: .text)
+        chatMessages.append(userMessage)
+
+        // Append an empty assistant placeholder that streaming will fill in.
+        // The chat view shows a typing indicator while this message has no content.
+        let assistantPlaceholder = ChatMessage(role: .assistant, content: "", source: .text)
+        chatMessages.append(assistantPlaceholder)
+        let assistantPlaceholderID = assistantPlaceholder.id
+
+        isSendingChatMessage = true
+
+        Task {
+            defer { isSendingChatMessage = false }
+
+            do {
+                let historyForAPI = conversationHistory.map { entry in
+                    (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+                }
+
+                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                    images: [],
+                    systemPrompt: Self.companionChatSystemPrompt,
+                    conversationHistory: historyForAPI,
+                    userPrompt: userText,
+                    onTextChunk: { [weak self] accumulatedText in
+                        guard let self else { return }
+                        // analyzeImageStreaming delivers accumulated text (not just the new chunk),
+                        // so we set rather than append to keep the content accurate.
+                        if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
+                            self.chatMessages[messageIndex].content = accumulatedText
+                        }
+                    }
+                )
+
+                // Ensure the final content is set (the last onTextChunk may not have
+                // fired if the stream ended without a trailing chunk)
+                if let messageIndex = chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
+                    chatMessages[messageIndex].content = fullResponseText
+                }
+
+                // Share this exchange with the conversation history so future requests
+                // (voice or text) have context for what was already discussed
+                conversationHistory.append((
+                    userTranscript: userText,
+                    assistantResponse: fullResponseText
+                ))
+                if conversationHistory.count > 10 {
+                    conversationHistory.removeFirst(conversationHistory.count - 10)
+                }
+
+                print("🧠 Chat message sent. Conversation history: \(conversationHistory.count) exchanges")
+
+            } catch {
+                // Replace the empty placeholder with a user-visible error so the
+                // chat doesn't silently show a blank bubble
+                if let messageIndex = chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
+                    chatMessages[messageIndex].content = "Something went wrong — please try again."
+                }
+                print("⚠️ Chat text error: \(error)")
+            }
+        }
+    }
+
     // MARK: - AI Response Pipeline
 
     /// Captures a screenshot, sends it along with the transcript to Claude,
@@ -983,6 +1086,11 @@ final class CompanionManager: ObservableObject {
                 if conversationHistory.count > 10 {
                     conversationHistory.removeFirst(conversationHistory.count - 10)
                 }
+
+                // Mirror the voice exchange into chatMessages so the chat window
+                // shows the full session history, including push-to-talk turns
+                chatMessages.append(ChatMessage(role: .user, content: transcript, source: .voice))
+                chatMessages.append(ChatMessage(role: .assistant, content: spokenText, source: .voice))
 
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
 

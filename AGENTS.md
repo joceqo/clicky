@@ -5,13 +5,13 @@
 
 ## Overview
 
-macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via AssemblyAI streaming, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
+macOS companion app. Lives in both the macOS status bar and the Dock. Clicking the menu bar icon opens a custom floating panel with companion voice controls. Clicking the Dock icon opens the Clicky chat window — a text-chat UI that shares the same conversation history as voice mode. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via AssemblyAI streaming, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
 
 All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in the app.
 
 ## Architecture
 
-- **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
+- **App Type**: Menu bar + Dock (`LSUIElement=false`). The status item opens the voice panel; the Dock icon opens the chat window.
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
 - **AI Chat**: Claude (Sonnet 4.6 default, Opus 4.6 optional) via Cloudflare Worker proxy with SSE streaming
@@ -52,8 +52,11 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1360 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, LM Studio API, ElevenLabs TTS, Supertonic TTS, and overlay management. Tracks voice state, conversation history, model selection (Sonnet/Opus/LM Studio/Local), TTS provider selection, and STT provider selection. Coordinates the full push-to-talk → screenshot → LLM → TTS → pointing pipeline. Routes between Claude (cloud), LM Studio (local vision), and Apple Intelligence (local text-only). |
+| `leanring_buddyApp.swift` | ~100 | App entry point. `CompanionAppDelegate` creates `MenuBarPanelManager`, `ChatWindowController`, and `CompanionManager`. Implements `applicationShouldHandleReopen` to open the chat window on Dock icon click. |
+| `ChatWindowController.swift` | ~50 | Manages the Clicky chat NSWindow. Created lazily on first dock-icon click; kept alive after closing so conversation persists across sessions. |
+| `ChatView.swift` | ~300 | SwiftUI chat window UI. Scrollable message list with user/assistant bubbles, streaming typing indicator, markdown rendering, and a text input bar. Observes `companionManager.chatMessages`. |
+| `ChatMessage.swift` | ~45 | Model for a single chat message. `role` (.user/.assistant), `content` (var for streaming), `timestamp`, `source` (.voice/.text). |
+| `CompanionManager.swift` | ~1450 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, LM Studio API, ElevenLabs TTS, Supertonic TTS, and overlay management. Tracks voice state, conversation history, model selection, TTS/STT provider selection, and `chatMessages` (the shared message log for the chat window). Coordinates the push-to-talk → screenshot → LLM → TTS → pointing pipeline and the text-chat → LLM → streaming pipeline. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
 | `CompanionPanelView.swift` | ~1200 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus/LM Studio/Local), gear icon settings panel (API keys, LM Studio model dropdown, TTS/STT pickers), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
