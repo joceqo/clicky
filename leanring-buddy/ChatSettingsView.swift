@@ -3,35 +3,52 @@
 //  leanring-buddy
 //
 //  Settings page shown inside the Clicky chat window when the user
-//  clicks the gear icon. Provides model selection, TTS/STT provider
-//  pickers, and API key configuration — all styled with the dark DS
-//  theme to match the rest of the chat window.
+//  clicks the gear icon. Organised into tabs so settings can grow
+//  without becoming a wall of scroll. Current tabs:
+//
+//  • Profile — name, goals, additional context (injected into Claude's system prompt)
+//  • General — model, TTS voice, STT speech, API keys
 //
 
 import SwiftUI
+
+/// Which tab is currently active in the settings view.
+private enum SettingsTab: String, CaseIterable {
+    case profile = "Profile"
+    case general = "General"
+}
 
 struct ChatSettingsView: View {
     @ObservedObject var companionManager: CompanionManager
     let onDismiss: () -> Void
 
+    @State private var selectedTab: SettingsTab = .profile
+
+    // General tab state
     @State private var apiKeyInput = ""
     @State private var isAPIKeyVisible = false
 
-    // Profile section state — pre-filled from companionManager.userProfile on appear
+    // Profile tab state — pre-filled from companionManager.userProfile on appear
     @State private var profileNickname: String = ""
     @State private var profileGoals: String = ""
     @State private var profileAdditionalContext: String = ""
     @State private var profileSaveStatus: String = ""
 
     var body: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 24) {
-                profileSection
-                modelSection
-                voiceSection
-                speechSection
+        VStack(spacing: 0) {
+            tabBar
+
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 24) {
+                    switch selectedTab {
+                    case .profile:
+                        profileTab
+                    case .general:
+                        generalTab
+                    }
+                }
+                .padding(24)
             }
-            .padding(24)
         }
         .background(DS.Colors.background)
         .navigationTitle("Settings")
@@ -45,7 +62,6 @@ struct ChatSettingsView: View {
                 apiKeyInput = companionManager.anthropicAPIKey
             }
             companionManager.fetchAvailableLMStudioModels()
-            // Pre-fill profile fields from the saved profile
             let savedProfile = companionManager.userProfile
             profileNickname = savedProfile.nickname
             profileGoals = savedProfile.goals
@@ -53,17 +69,51 @@ struct ChatSettingsView: View {
         }
     }
 
-    // MARK: - Profile
+    // MARK: - Tab Bar
 
-    /// A personal context card that gets prepended to every Claude system prompt.
-    /// The more the user fills in, the more Clicky can personalize its responses
-    /// and keep conversations oriented around their actual goals.
-    private var profileSection: some View {
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            ForEach(SettingsTab.allCases, id: \.self) { tab in
+                tabBarButton(tab: tab)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(DS.Colors.surface1)
+        .overlay(
+            Rectangle()
+                .fill(DS.Colors.borderSubtle)
+                .frame(height: 0.5),
+            alignment: .bottom
+        )
+    }
+
+    private func tabBarButton(tab: SettingsTab) -> some View {
+        let isSelected = selectedTab == tab
+        return Button(action: { selectedTab = tab }) {
+            Text(tab.rawValue)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    // MARK: - Profile Tab
+
+    private var profileTab: some View {
         settingsSection(title: "Profile") {
             VStack(alignment: .leading, spacing: 12) {
                 settingsHint("Tell Clicky who you are. This gets added to every conversation so responses are always personalized to you.")
 
-                // Nickname
+                // Name
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Your name")
                         .font(.system(size: 12, weight: .semibold))
@@ -115,7 +165,7 @@ struct ChatSettingsView: View {
                     )
                 }
 
-                // Save button + status
+                // Save
                 HStack {
                     if !profileSaveStatus.isEmpty {
                         settingsHint(profileSaveStatus)
@@ -147,14 +197,13 @@ struct ChatSettingsView: View {
         )
         companionManager.saveUserProfile(updatedProfile)
         profileSaveStatus = "Saved"
-        // Clear the status after 2 seconds
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             profileSaveStatus = ""
         }
     }
 
-    /// A styled multi-line text editor for profile fields. SwiftUI's TextEditor doesn't
-    /// support placeholder text natively, so we layer a hint label behind it.
+    /// A styled multi-line text editor. SwiftUI's TextEditor has no placeholder support,
+    /// so we layer a greyed-out hint label behind it when the binding is empty.
     private func profileTextEditor(placeholder: String, text: Binding<String>, minHeight: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
             if text.wrappedValue.isEmpty {
@@ -182,6 +231,16 @@ struct ChatSettingsView: View {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
         )
+    }
+
+    // MARK: - General Tab
+
+    private var generalTab: some View {
+        Group {
+            modelSection
+            voiceSection
+            speechSection
+        }
     }
 
     // MARK: - Model
@@ -258,10 +317,10 @@ struct ChatSettingsView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
-                )
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+            )
         }
         .buttonStyle(.plain)
         .pointerCursor()
@@ -305,12 +364,9 @@ struct ChatSettingsView: View {
 
     private var selectedModelProvider: String {
         switch companionManager.selectedModel {
-        case "lmstudio":
-            return "lmstudio"
-        case "local":
-            return "local"
-        default:
-            return "anthropic"
+        case "lmstudio": return "lmstudio"
+        case "local":    return "local"
+        default:         return "anthropic"
         }
     }
 
