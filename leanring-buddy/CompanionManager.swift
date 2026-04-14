@@ -65,6 +65,8 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
+    /// Persists chat history (JSON) and screenshots to Application Support.
+    let chatHistoryStore = ChatHistoryStore()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -348,6 +350,9 @@ final class CompanionManager: ObservableObject {
     }
 
     func start() {
+        // Restore persisted chat history so the chat window shows previous sessions
+        chatMessages = chatHistoryStore.loadHistory()
+
         refreshAllPermissions()
         print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
@@ -844,6 +849,9 @@ final class CompanionManager: ObservableObject {
 
                 print("🧠 Chat message sent. Conversation history: \(conversationHistory.count) exchanges")
 
+                // Persist the updated message list to disk
+                chatHistoryStore.saveHistory(chatMessages)
+
             } catch {
                 // Replace the empty placeholder with a user-visible error so the
                 // chat doesn't silently show a blank bubble
@@ -1087,10 +1095,37 @@ final class CompanionManager: ObservableObject {
                     conversationHistory.removeFirst(conversationHistory.count - 10)
                 }
 
-                // Mirror the voice exchange into chatMessages so the chat window
-                // shows the full session history, including push-to-talk turns
-                chatMessages.append(ChatMessage(role: .user, content: transcript, source: .voice))
+                // Mirror the voice exchange into chatMessages immediately so the chat
+                // window updates without waiting for screenshot compression to finish.
+                // The user message gets a pre-assigned UUID so screenshot files can be
+                // named after it even though they're saved asynchronously.
+                let voiceUserMessageID = UUID()
+                chatMessages.append(ChatMessage(
+                    id: voiceUserMessageID,
+                    role: .user,
+                    content: transcript,
+                    source: .voice,
+                    ocrText: extractedScreenText
+                ))
                 chatMessages.append(ChatMessage(role: .assistant, content: spokenText, source: .voice))
+
+                // Compress and save screenshots in a background task so it doesn't
+                // delay TTS playback. Once saved, update the message with file names
+                // and persist the full history JSON.
+                let rawCaptureDataItems = screenCaptures.map { $0.imageData }
+                Task.detached(priority: .utility) { [weak self] in
+                    guard let self else { return }
+                    let savedFileNames = self.chatHistoryStore.saveCompressedScreenshots(
+                        rawCaptureDataItems,
+                        forMessageWithID: voiceUserMessageID
+                    )
+                    await MainActor.run {
+                        if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == voiceUserMessageID }) {
+                            self.chatMessages[messageIndex].screenshotFileNames = savedFileNames
+                        }
+                        self.chatHistoryStore.saveHistory(self.chatMessages)
+                    }
+                }
 
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
 

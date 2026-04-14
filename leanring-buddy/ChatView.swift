@@ -8,6 +8,7 @@
 //  user has a single place to review what was said and what Clicky answered.
 //
 
+import AppKit
 import SwiftUI
 
 // MARK: - Root View
@@ -90,7 +91,10 @@ struct ChatView: View {
             ScrollView(.vertical) {
                 LazyVStack(spacing: 12) {
                     ForEach(companionManager.chatMessages) { message in
-                        ChatMessageBubbleView(message: message)
+                        ChatMessageBubbleView(
+                            message: message,
+                            chatHistoryStore: companionManager.chatHistoryStore
+                        )
                     }
 
                     // Typing indicator appears below the last message while Clicky
@@ -213,8 +217,11 @@ private struct SendButtonView: View {
 /// Renders a single chat message. User messages are right-aligned with a blue bubble;
 /// assistant messages are left-aligned with a dark surface bubble. Voice messages get
 /// a mic badge so the user can tell which exchanges came from push-to-talk.
+/// Voice user messages also show a horizontal strip of screenshot thumbnails so the
+/// user can see exactly what Clicky was looking at when it answered.
 private struct ChatMessageBubbleView: View {
     let message: ChatMessage
+    let chatHistoryStore: ChatHistoryStore
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 6) {
@@ -232,7 +239,12 @@ private struct ChatMessageBubbleView: View {
     // MARK: User bubble
 
     private var userBubble: some View {
-        VStack(alignment: .trailing, spacing: 4) {
+        VStack(alignment: .trailing, spacing: 6) {
+            // Screenshot thumbnails — only for voice messages that have saved captures
+            if !message.screenshotFileNames.isEmpty {
+                screenshotThumbnailStrip
+            }
+
             Text(message.content)
                 .font(.system(size: 13))
                 .foregroundColor(.white)
@@ -243,6 +255,20 @@ private struct ChatMessageBubbleView: View {
                 .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.large))
 
             bottomMetaRow(role: .user)
+        }
+    }
+
+    // MARK: Screenshot thumbnails
+
+    /// A horizontal strip of small screenshot previews shown above the user's
+    /// voice message text bubble. Each thumbnail is 96 px tall with rounded corners.
+    private var screenshotThumbnailStrip: some View {
+        HStack(spacing: 6) {
+            ForEach(message.screenshotFileNames, id: \.self) { fileName in
+                ScreenshotThumbnailView(
+                    fileURL: chatHistoryStore.screenshotFileURL(fileName: fileName)
+                )
+            }
         }
     }
 
@@ -317,6 +343,52 @@ private struct ChatMessageBubbleView: View {
         formatter.timeStyle = .short
         formatter.dateStyle = .none
         return formatter.string(from: message.timestamp)
+    }
+}
+
+// MARK: - Screenshot Thumbnail
+
+/// Loads and displays a single compressed screenshot from disk.
+/// Shows a neutral placeholder while the image is loading or if the file is missing.
+private struct ScreenshotThumbnailView: View {
+    let fileURL: URL
+
+    @State private var thumbnailImage: NSImage? = nil
+
+    private let thumbnailHeight: CGFloat = 90
+
+    var body: some View {
+        Group {
+            if let image = thumbnailImage {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(height: thumbnailHeight)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
+            } else {
+                // Placeholder shown while the image loads or if the file is missing
+                RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
+                    .fill(DS.Colors.surface3)
+                    .frame(height: thumbnailHeight)
+                    .overlay(
+                        Image(systemName: "photo")
+                            .foregroundColor(DS.Colors.textTertiary)
+                    )
+            }
+        }
+        .onAppear { loadThumbnail() }
+        // Reload if screenshotFileNames was updated after async compression finished
+        .onChange(of: fileURL) { _ in loadThumbnail() }
+    }
+
+    private func loadThumbnail() {
+        // Load from disk on a background thread so the main thread stays responsive
+        let url = fileURL
+        Task.detached(priority: .utility) {
+            let image = NSImage(contentsOf: url)
+            await MainActor.run { thumbnailImage = image }
+        }
     }
 }
 
