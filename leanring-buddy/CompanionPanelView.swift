@@ -849,6 +849,27 @@ struct CompanionPanelView: View {
                 .onSubmit {
                     companionManager.setLMStudioAPIKey(lmStudioAPIKeyInput)
                 }
+
+                // OCR text extraction toggle — when on, screen text is extracted via
+                // Accessibility API or Vision OCR and prepended to the prompt before
+                // sending to LM Studio or Apple Intelligence. Lets text-only / weak-vision
+                // local models understand what's on screen without relying on image encoding.
+                HStack {
+                    Text("Screen text extraction (OCR)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    Spacer()
+
+                    Toggle("", isOn: Binding(
+                        get: { companionManager.isOCRExtractionEnabled },
+                        set: { companionManager.setOCRExtractionEnabled($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .tint(DS.Colors.accent)
+                    .scaleEffect(0.8)
+                }
             }
             .padding(.vertical, 4)
             .onAppear {

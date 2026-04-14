@@ -72,6 +72,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `SupertonicTTSClient.swift` | ~160 | On-device TTS client backed by Supertonic ONNX (66M params, ~167× realtime). Auto-downloads models from HuggingFace on first use. Mirrors `ElevenLabsTTSClient` interface. |
 | `SupertonicEngine.swift` | ~600 | ONNX inference engine for Supertonic. Vendored from supertone-inc/supertonic. Handles text preprocessing, chunking, duration prediction, latent diffusion denoising, and vocoder synthesis via ONNX Runtime. |
 | `ParakeetTranscriptionProvider.swift` | ~160 | On-device ASR provider using NVIDIA Parakeet via FluidAudio (CoreML/ANE). Implements `BuddyTranscriptionProvider` with the same buffer-then-transcribe pattern as the OpenAI provider. No API key required. |
+| `TextExtractor.swift` | ~290 | Extracts visible text from the frontmost app using two strategies: Accessibility API (primary, reads AXUIElement text + word bounds) and Vision OCR (fallback for Chrome/Electron). Used by the Apple Intelligence and LM Studio pipelines to give local models screen context without image encoding. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |

@@ -162,6 +162,20 @@ final class CompanionManager: ObservableObject {
     /// Models discovered from LM Studio's /v1/models endpoint.
     @Published var availableLMStudioModels: [String] = []
 
+    /// Whether to extract on-screen text via Accessibility API or Vision OCR before
+    /// sending a query to local models (Apple Intelligence) or LM Studio.
+    ///
+    /// When enabled, the extracted text is prepended to the user's spoken prompt so
+    /// that text-only models (Apple Intelligence) gain screen context and LM Studio
+    /// models with weak vision can still read what's on screen without depending
+    /// entirely on image encoding. Defaults to true. Persisted to UserDefaults.
+    @Published var isOCRExtractionEnabled: Bool = UserDefaults.standard.object(forKey: "isOCRExtractionEnabled") as? Bool ?? true
+
+    func setOCRExtractionEnabled(_ enabled: Bool) {
+        isOCRExtractionEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isOCRExtractionEnabled")
+    }
+
     /// Queries LM Studio's local /v1/models endpoint and populates the model dropdown.
     func fetchAvailableLMStudioModels() {
         guard let url = URL(string: "http://127.0.0.1:1234/v1/models") else { return }
@@ -757,32 +771,74 @@ final class CompanionManager: ObservableObject {
                 let fullResponseText: String
                 var screenCaptures: [CompanionScreenCapture] = []
 
+                // For local models (Apple Intelligence) and LM Studio, attempt to extract
+                // visible on-screen text before sending the query. This gives text-only
+                // models (Apple Intelligence) screen context they'd otherwise have none of,
+                // and helps LM Studio models with weak vision by providing a text fallback
+                // alongside the screenshot.
+                var extractedScreenText: String? = nil
+                if isOCRExtractionEnabled && (isLocalModel || isLMStudioModel) {
+                    if let extractionResult = try? await TextExtractor().extract() {
+                        let trimmedText = extractionResult.fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmedText.isEmpty {
+                            extractedScreenText = trimmedText
+                            print("📄 OCR extracted \(trimmedText.count) chars via \(extractionResult.source)")
+                        }
+                    }
+                }
+
+                // Build the user prompt with screen text prepended when available.
+                // The format gives the model clear context about what text is on screen
+                // before the user's actual spoken question.
+                let userPromptWithScreenContext: String = {
+                    if let screenText = extractedScreenText {
+                        return "Here is the text visible on the user's screen:\n\n\(screenText)\n\nUser's question: \(transcript)"
+                    }
+                    return transcript
+                }()
+
                 if isLocalModel {
                     // Local mode (Apple Intelligence): text-only, no screenshots, no pointing.
-                    // The on-device model has no vision capability, so we skip screen
-                    // capture entirely and just send the user's spoken transcript.
+                    // The on-device model has no vision capability, so we rely on OCR-extracted
+                    // screen text (when available) to give it context about the user's screen.
                     let historyForAPI = conversationHistory.map { entry in
                         (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                     }
 
-                    let localSystemPrompt = """
-                    you are clicky, a helpful voice assistant that lives in the user's menu bar on macOS. \
-                    you speak in a casual, friendly tone — short sentences, like talking to a friend. \
-                    you don't have access to the user's screen in this mode, so just answer based on what they say. \
-                    keep responses concise since they'll be spoken aloud. \
-                    CRITICAL: you MUST reply in the SAME language the user uses. if the user writes in French, \
-                    reply entirely in French. if in Spanish, reply in Spanish. match their language exactly.
-                    """
+                    // Update the system prompt to reflect whether screen text is available.
+                    // When OCR succeeded, tell the model it has that context; when it didn't,
+                    // keep the original "no screen access" framing so the model doesn't hallucinate.
+                    let localSystemPrompt: String
+                    if extractedScreenText != nil {
+                        localSystemPrompt = """
+                        you are clicky, a helpful voice assistant that lives in the user's menu bar on macOS. \
+                        you speak in a casual, friendly tone — short sentences, like talking to a friend. \
+                        you have been given the text extracted from the user's screen — use it to give a relevant answer. \
+                        keep responses concise since they'll be spoken aloud. \
+                        CRITICAL: you MUST reply in the SAME language the user uses. if the user writes in French, \
+                        reply entirely in French. if in Spanish, reply in Spanish. match their language exactly.
+                        """
+                    } else {
+                        localSystemPrompt = """
+                        you are clicky, a helpful voice assistant that lives in the user's menu bar on macOS. \
+                        you speak in a casual, friendly tone — short sentences, like talking to a friend. \
+                        you don't have access to the user's screen in this mode, so just answer based on what they say. \
+                        keep responses concise since they'll be spoken aloud. \
+                        CRITICAL: you MUST reply in the SAME language the user uses. if the user writes in French, \
+                        reply entirely in French. if in Spanish, reply in Spanish. match their language exactly.
+                        """
+                    }
 
                     let (responseText, _) = try await apfelAPI.chat(
                         systemPrompt: localSystemPrompt,
                         conversationHistory: historyForAPI,
-                        userPrompt: transcript
+                        userPrompt: userPromptWithScreenContext
                     )
                     fullResponseText = responseText + " [POINT:none]"
                 } else if isLMStudioModel {
                     // LM Studio mode: local vision model via OpenAI-compatible API.
-                    // Supports screenshots — LM Studio vision models can see the screen.
+                    // Sends screenshots for visual context AND prepends OCR-extracted text
+                    // so weak vision models can still read the screen reliably.
                     screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
 
                     guard !Task.isCancelled else { return }
@@ -801,7 +857,7 @@ final class CompanionManager: ObservableObject {
                         images: labeledImages,
                         systemPrompt: Self.companionVoiceResponseSystemPrompt,
                         conversationHistory: historyForAPI,
-                        userPrompt: transcript,
+                        userPrompt: userPromptWithScreenContext,
                         onTextChunk: { _ in
                             // No streaming text display — spinner stays until TTS plays
                         }
