@@ -5,16 +5,17 @@
 
 import Foundation
 
-/// OpenAI API helper for vision analysis
+/// OpenAI-compatible API helper for vision analysis.
+/// Works with OpenAI, LM Studio, and any server exposing the /v1/chat/completions endpoint.
 class OpenAIAPI {
-    private let apiKey: String
-    private let apiURL: URL
-    private let model: String
+    var apiKey: String
+    var apiURL: URL
+    var model: String
     private let session: URLSession
 
-    init(apiKey: String, model: String = "gpt-5.2-2025-12-11") {
+    init(apiKey: String = "", apiURL: URL = URL(string: "http://127.0.0.1:1234/v1/chat/completions")!, model: String = "") {
         self.apiKey = apiKey
-        self.apiURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+        self.apiURL = apiURL
         self.model = model
 
         // Use .default instead of .ephemeral so TLS session tickets are cached.
@@ -138,5 +139,113 @@ class OpenAIAPI {
 
         let duration = Date().timeIntervalSince(startTime)
         return (text: text, duration: duration)
+    }
+
+    /// Send a streaming vision request using SSE (Server-Sent Events).
+    /// Matches the ClaudeAPI.analyzeImageStreaming() signature so callers can
+    /// swap between Claude and LM Studio with the same interface.
+    func analyzeImageStreaming(
+        images: [(data: Data, label: String)],
+        systemPrompt: String,
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
+        userPrompt: String,
+        onTextChunk: @MainActor @Sendable (String) -> Void
+    ) async throws -> (text: String, duration: TimeInterval) {
+        let startTime = Date()
+
+        var request = URLRequest(url: apiURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 120
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        // Build messages array
+        var messages: [[String: Any]] = []
+
+        messages.append([
+            "role": "system",
+            "content": systemPrompt
+        ])
+
+        for (userPlaceholder, assistantResponse) in conversationHistory {
+            messages.append(["role": "user", "content": userPlaceholder])
+            messages.append(["role": "assistant", "content": assistantResponse])
+        }
+
+        // Build current message with all labeled images + prompt
+        var contentBlocks: [[String: Any]] = []
+        for image in images {
+            contentBlocks.append([
+                "type": "text",
+                "text": image.label
+            ])
+            contentBlocks.append([
+                "type": "image_url",
+                "image_url": [
+                    "url": "data:image/jpeg;base64,\(image.data.base64EncodedString())"
+                ]
+            ])
+        }
+        contentBlocks.append([
+            "type": "text",
+            "text": userPrompt
+        ])
+        messages.append(["role": "user", "content": contentBlocks])
+
+        let body: [String: Any] = [
+            "model": model,
+            "max_completion_tokens": 600,
+            "stream": true,
+            "messages": messages
+        ]
+
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        request.httpBody = bodyData
+        let payloadMB = Double(bodyData.count) / 1_048_576.0
+        print("🌐 OpenAI streaming request: \(String(format: "%.1f", payloadMB))MB, \(images.count) image(s)")
+
+        // Stream SSE response
+        let (bytes, response) = try await session.bytes(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            // Try to read the error body for diagnostics
+            var errorBody = ""
+            for try await line in bytes.lines {
+                errorBody += line
+            }
+            throw NSError(
+                domain: "OpenAIAPI",
+                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                userInfo: [NSLocalizedDescriptionKey: "API Error: \(errorBody)"]
+            )
+        }
+
+        var fullText = ""
+        for try await line in bytes.lines {
+            guard !Task.isCancelled else { break }
+
+            // SSE format: "data: {json}" or "data: [DONE]"
+            guard line.hasPrefix("data: ") else { continue }
+            let jsonString = String(line.dropFirst(6))
+            if jsonString == "[DONE]" { break }
+
+            guard let jsonData = jsonString.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let firstChoice = choices.first,
+                  let delta = firstChoice["delta"] as? [String: Any],
+                  let content = delta["content"] as? String else {
+                continue
+            }
+
+            fullText += content
+            await onTextChunk(content)
+        }
+
+        let duration = Date().timeIntervalSince(startTime)
+        return (text: fullText, duration: duration)
     }
 }
