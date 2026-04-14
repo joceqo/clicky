@@ -109,6 +109,22 @@ final class CompanionManager: ObservableObject {
         return SupertonicTTSClient()
     }()
 
+    /// On-device LLM client via Apple Intelligence (FoundationModels).
+    /// Text-only, no vision. Requires macOS 26+.
+    private lazy var apfelAPI: ApfelAPI = {
+        return ApfelAPI()
+    }()
+
+    /// Whether the selected model is the local on-device Apple Intelligence model.
+    var isLocalModel: Bool {
+        selectedModel == "local"
+    }
+
+    /// Whether Apple Intelligence is available for local text-only mode.
+    var isAppleIntelligenceAvailable: Bool {
+        apfelAPI.isAvailable
+    }
+
     /// Which TTS backend to use for voice responses. "elevenlabs" or "supertonic".
     /// Persisted to UserDefaults so the choice survives app restarts.
     @Published var selectedTTSProvider: String = UserDefaults.standard.string(forKey: "selectedTTSProvider") ?? "elevenlabs"
@@ -661,33 +677,62 @@ final class CompanionManager: ObservableObject {
             voiceState = .processing
 
             do {
-                // Capture all connected screens so the AI has full context
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                let fullResponseText: String
+                var screenCaptures: [CompanionScreenCapture] = []
 
-                guard !Task.isCancelled else { return }
-
-                // Build image labels with the actual screenshot pixel dimensions
-                // so Claude's coordinate space matches the image it sees. We
-                // scale from screenshot pixels to display points ourselves.
-                let labeledImages = screenCaptures.map { capture in
-                    let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-                    return (data: capture.imageData, label: capture.label + dimensionInfo)
-                }
-
-                // Pass conversation history so Claude remembers prior exchanges
-                let historyForAPI = conversationHistory.map { entry in
-                    (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
-                }
-
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
-                    conversationHistory: historyForAPI,
-                    userPrompt: transcript,
-                    onTextChunk: { _ in
-                        // No streaming text display — spinner stays until TTS plays
+                if isLocalModel {
+                    // Local mode (Apple Intelligence): text-only, no screenshots, no pointing.
+                    // The on-device model has no vision capability, so we skip screen
+                    // capture entirely and just send the user's spoken transcript.
+                    let historyForAPI = conversationHistory.map { entry in
+                        (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                     }
-                )
+
+                    let localSystemPrompt = """
+                    you are clicky, a helpful voice assistant that lives in the user's menu bar on macOS. \
+                    you speak in a casual, friendly tone — short sentences, like talking to a friend. \
+                    you don't have access to the user's screen in this mode, so just answer based on what they say. \
+                    keep responses concise since they'll be spoken aloud. \
+                    CRITICAL: you MUST reply in the SAME language the user uses. if the user writes in French, \
+                    reply entirely in French. if in Spanish, reply in Spanish. match their language exactly.
+                    """
+
+                    let (responseText, _) = try await apfelAPI.chat(
+                        systemPrompt: localSystemPrompt,
+                        conversationHistory: historyForAPI,
+                        userPrompt: transcript
+                    )
+                    fullResponseText = responseText + " [POINT:none]"
+                } else {
+                    // Cloud mode (Claude): full vision pipeline with screenshots and pointing
+                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+
+                    guard !Task.isCancelled else { return }
+
+                    // Build image labels with the actual screenshot pixel dimensions
+                    // so Claude's coordinate space matches the image it sees. We
+                    // scale from screenshot pixels to display points ourselves.
+                    let labeledImages = screenCaptures.map { capture in
+                        let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                        return (data: capture.imageData, label: capture.label + dimensionInfo)
+                    }
+
+                    // Pass conversation history so Claude remembers prior exchanges
+                    let historyForAPI = conversationHistory.map { entry in
+                        (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+                    }
+
+                    let (responseText, _) = try await claudeAPI.analyzeImageStreaming(
+                        images: labeledImages,
+                        systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                        conversationHistory: historyForAPI,
+                        userPrompt: transcript,
+                        onTextChunk: { _ in
+                            // No streaming text display — spinner stays until TTS plays
+                        }
+                    )
+                    fullResponseText = responseText
+                }
 
                 guard !Task.isCancelled else { return }
 
@@ -706,6 +751,7 @@ final class CompanionManager: ObservableObject {
 
                 // Pick the screen capture matching Claude's screen number,
                 // falling back to the cursor screen if not specified.
+                // In local mode screenCaptures is empty so this returns nil.
                 let targetScreenCapture: CompanionScreenCapture? = {
                     if let screenNumber = parseResult.screenNumber,
                        screenNumber >= 1 && screenNumber <= screenCaptures.count {
