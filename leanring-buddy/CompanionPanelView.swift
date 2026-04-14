@@ -628,6 +628,7 @@ struct CompanionPanelView: View {
             HStack(spacing: 0) {
                 modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
                 modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                modelOptionButton(label: "Local", modelID: "local")
             }
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -637,6 +638,18 @@ struct CompanionPanelView: View {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
             )
+
+            if companionManager.selectedModel == "local" && !companionManager.isAppleIntelligenceAvailable {
+                Text("Requires macOS 26+ with Apple Intelligence enabled")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.warning)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            } else if companionManager.selectedModel == "local" {
+                Text("Text-only · no screenshots · on-device")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
         }
         .padding(.vertical, 4)
     }
