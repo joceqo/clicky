@@ -353,6 +353,18 @@ struct BlueCursorView: View {
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
 
+            // Model switch picker — segmented pill shown briefly after ⌃M
+            if companionManager.modelSwitchBadgeModelID != nil, buddyIsVisibleOnThisScreen {
+                ModelSwitchPickerView(
+                    availableModels: companionManager.availableModels,
+                    selectedModelID: companionManager.selectedModel
+                )
+                .position(x: cursorPosition.x, y: cursorPosition.y + 26)
+                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                .animation(.easeOut(duration: 0.2), value: companionManager.modelSwitchBadgeModelID)
+            }
+
         }
         .frame(width: screenFrame.width, height: screenFrame.height)
         .ignoresSafeArea()
@@ -787,6 +799,80 @@ private struct BlueCursorSpinnerView: View {
                     isSpinning = true
                 }
             }
+    }
+}
+
+// MARK: - Model Switch Picker
+
+/// Segmented picker shown below the Clicky cursor when cycling models with ⌃M.
+/// Shows all available provider icons with a sliding blue highlight on the
+/// selected one — like the macOS keyboard input source switcher.
+private struct ModelSwitchPickerView: View {
+    let availableModels: [String]
+    let selectedModelID: String
+
+    private let itemSize: CGFloat = 28
+    private let itemSpacing: CGFloat = 2
+    private let padding: CGFloat = 3
+
+    private var selectedIndex: Int {
+        availableModels.firstIndex(of: selectedModelID) ?? 0
+    }
+
+    var body: some View {
+        let totalWidth = CGFloat(availableModels.count) * itemSize
+            + CGFloat(max(0, availableModels.count - 1)) * itemSpacing
+            + padding * 2
+
+        ZStack(alignment: .leading) {
+            // Sliding highlight
+            RoundedRectangle(cornerRadius: 6)
+                .fill(DS.Colors.overlayCursorBlue)
+                .frame(width: itemSize, height: itemSize)
+                .offset(x: padding + CGFloat(selectedIndex) * (itemSize + itemSpacing))
+                .animation(.spring(response: 0.25, dampingFraction: 0.75), value: selectedIndex)
+
+            // Icons row
+            HStack(spacing: itemSpacing) {
+                ForEach(Array(availableModels.enumerated()), id: \.offset) { _, modelID in
+                    modelIcon(for: modelID)
+                        .frame(width: itemSize, height: itemSize)
+                }
+            }
+            .padding(.horizontal, padding)
+        }
+        .frame(width: totalWidth, height: itemSize + padding * 2)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(hex: "#1a1c1b").opacity(0.9))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5)
+                )
+        )
+        .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 3)
+    }
+
+    @ViewBuilder
+    private func modelIcon(for modelID: String) -> some View {
+        switch modelID {
+        case "claude-opus-4-6", "claude-sonnet-4-6":
+            Image("icon-anthropic")
+                .resizable().scaledToFit()
+                .frame(width: 14, height: 14)
+        case "lmstudio":
+            Image("icon-lmstudio")
+                .resizable().scaledToFit()
+                .frame(width: 14, height: 14)
+        case "local":
+            Image(systemName: "apple.logo")
+                .font(.system(size: 12))
+                .foregroundColor(.white)
+        default:
+            Image(systemName: "cpu")
+                .font(.system(size: 12))
+                .foregroundColor(.white)
+        }
     }
 }
 

@@ -209,7 +209,25 @@ final class CompanionManager: ObservableObject {
                     }
                 }
             } catch {
-                print("Failed to fetch models from LM Studio: \(error)")
+                // LM Studio unreachable — clear the list so it drops from the model cycler
+                if !self.availableLMStudioModels.isEmpty {
+                    print("[LMStudio] Lost connection, clearing model list")
+                    self.availableLMStudioModels = []
+                }
+            }
+        }
+    }
+
+    private var lmStudioPollingTask: Task<Void, Never>?
+
+    /// Polls LM Studio's /v1/models endpoint every 30 seconds so the model
+    /// cycler (⌃M) picks up LM Studio whenever it starts or stops.
+    private func startLMStudioModelPolling() {
+        lmStudioPollingTask?.cancel()
+        lmStudioPollingTask = Task { @MainActor in
+            while !Task.isCancelled {
+                fetchAvailableLMStudioModels()
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
             }
         }
     }
@@ -253,6 +271,7 @@ final class CompanionManager: ObservableObject {
     private var currentResponseTask: Task<Void, Never>?
 
     private var shortcutTransitionCancellable: AnyCancellable?
+    private var modelCycleCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
@@ -291,6 +310,11 @@ final class CompanionManager: ObservableObject {
     /// The Claude model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
 
+    /// Set briefly after a model cycle to show the icon badge on the cursor overlay.
+    /// Cleared automatically after the display duration.
+    @Published var modelSwitchBadgeModelID: String? = nil
+    private var modelSwitchBadgeDismissTask: Task<Void, Never>?
+
     /// The actual model identifier to store in message metadata. For Claude models
     /// this is the model ID (e.g. "claude-sonnet-4-6"). For LM Studio, this is the
     /// real model name (e.g. "gemma-4-2b") so the JSON log is useful for debugging.
@@ -303,12 +327,71 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    /// The last-used Anthropic model. Persisted so the ⌃M cycler remembers
+    /// whether you prefer Sonnet or Opus. Defaults to Sonnet (cheaper).
+    @Published var lastUsedAnthropicModel: String = UserDefaults.standard.string(forKey: "lastUsedAnthropicModel") ?? "claude-sonnet-4-6"
+
     func setSelectedModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
         // Only update claudeAPI.model for actual Claude model IDs
         if model != "local" && model != "lmstudio" {
             claudeAPI.model = model
+            // Remember which Anthropic model was last used
+            lastUsedAnthropicModel = model
+            UserDefaults.standard.set(model, forKey: "lastUsedAnthropicModel")
+        }
+    }
+
+    /// Models the user can actually use right now, based on API key availability
+    /// and service reachability. Used by the keyboard shortcut model cycler.
+    /// Shows one Anthropic slot (last-used model, defaulting to Sonnet).
+    var availableModels: [String] {
+        var models: [String] = []
+        // Anthropic: one slot using the last-used Claude model (Sonnet or Opus)
+        if isUsingDirectAPIKey || !Self.workerBaseURL.contains("your-worker-name") {
+            models.append(lastUsedAnthropicModel)
+        }
+        // LM Studio: available if at least one model was discovered
+        if !availableLMStudioModels.isEmpty {
+            models.append("lmstudio")
+        }
+        // Apple Intelligence: available if macOS 26+ and FoundationModels present
+        if isAppleIntelligenceAvailable {
+            models.append("local")
+        }
+        return models
+    }
+
+    /// Cycles to the next available model in the list. Wraps around at the end.
+    /// Briefly shows a model icon badge on the Clicky cursor overlay.
+    func cycleToNextModel() {
+        let models = availableModels
+        print("[ModelCycler] cycleToNextModel called — available: \(models), current: \(selectedModel)")
+        guard models.count > 1 else {
+            print("[ModelCycler] Only \(models.count) model(s) available, skipping cycle")
+            return
+        }
+        if let currentIndex = models.firstIndex(of: selectedModel) {
+            let nextIndex = (currentIndex + 1) % models.count
+            print("[ModelCycler] Cycling \(selectedModel) → \(models[nextIndex])")
+            setSelectedModel(models[nextIndex])
+        } else {
+            print("[ModelCycler] Current model not in available list, jumping to \(models[0])")
+            setSelectedModel(models[0])
+        }
+        showModelSwitchBadge()
+    }
+
+    /// Shows the model icon badge on the cursor overlay, then auto-dismisses.
+    private func showModelSwitchBadge() {
+        modelSwitchBadgeDismissTask?.cancel()
+        modelSwitchBadgeModelID = selectedModel
+        print("[ModelCycler] Badge shown: \(selectedModel)")
+        modelSwitchBadgeDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard !Task.isCancelled else { return }
+            modelSwitchBadgeModelID = nil
         }
     }
 
@@ -380,11 +463,10 @@ final class CompanionManager: ObservableObject {
         conversationStore.migrateFromLegacyHistoryIfNeeded()
         conversations = conversationStore.loadConversationsIndex()
 
-        if let mostRecentConversation = conversations.first {
-            switchToConversation(mostRecentConversation.id)
-        } else {
-            createNewConversation()
-        }
+        // Always start a fresh conversation on launch so voice/text exchanges
+        // don't pile into the previous session. Old conversations stay in the
+        // sidebar for reference.
+        createNewConversation()
 
         refreshAllPermissions()
         print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
@@ -403,6 +485,10 @@ final class CompanionManager: ObservableObject {
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
+
+        // Discover LM Studio models at startup and re-check periodically so
+        // the model cycler picks up LM Studio whenever it starts or stops.
+        startLMStudioModelPolling()
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
@@ -815,6 +901,13 @@ final class CompanionManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] transition in
                 self?.handleShortcutTransition(transition)
+            }
+
+        modelCycleCancellable = globalPushToTalkShortcutMonitor
+            .modelCyclePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.cycleToNextModel()
             }
     }
 

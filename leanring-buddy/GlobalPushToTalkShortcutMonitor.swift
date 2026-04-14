@@ -14,6 +14,8 @@ import Foundation
 
 final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     let shortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
+    /// Fires once per ⌃M key-down. Used to cycle the active LLM model globally.
+    let modelCyclePublisher = PassthroughSubject<Void, Never>()
 
     private var globalEventTap: CFMachPort?
     private var globalEventTapRunLoopSource: CFRunLoopSource?
@@ -109,6 +111,20 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         }
 
         let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+
+        // ⌃M (keycode 46) — cycle LLM model on key-down only
+        let controlMKeyCode: UInt16 = 46
+        if eventType == .keyDown
+            && eventKeyCode == controlMKeyCode
+            && event.flags.contains(.maskControl)
+            && !event.flags.contains(.maskCommand)
+            && !event.flags.contains(.maskAlternate)
+        {
+            print("[ModelCycler] Global ⌃M detected")
+            modelCyclePublisher.send()
+            return Unmanaged.passUnretained(event)
+        }
+
         let shortcutTransition = BuddyPushToTalkShortcut.shortcutTransition(
             for: eventType,
             keyCode: eventKeyCode,

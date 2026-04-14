@@ -15,7 +15,6 @@ struct ChatContainerView: View {
     @ObservedObject var companionManager: CompanionManager
     @State private var sidebarVisibility: NavigationSplitViewVisibility = .automatic
     @State private var isShowingSettings = false
-    @State private var lastSwiftGrabStatusMessage: String? = nil
 
     var body: some View {
         NavigationSplitView(columnVisibility: $sidebarVisibility) {
@@ -61,25 +60,13 @@ struct ChatContainerView: View {
             }
 
             ToolbarItem(placement: .status) {
-                HStack(spacing: 8) {
-                    HStack(spacing: 4) {
-                        modelIconView
-                        Text(modelDisplayName)
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
-
-                    if let lastSwiftGrabStatusMessage {
-                        Text(lastSwiftGrabStatusMessage)
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    } else {
-                        Text("Grab: cmd+opt+i")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
+                HStack(spacing: 4) {
+                    modelIconView
+                    Text(modelDisplayName)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
                 }
+                .help("⌃M to switch model")
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
             }
@@ -93,9 +80,7 @@ struct ChatContainerView: View {
                 .help(isShowingSettings ? "Back to Chat" : "Settings")
             }
         }
-        .swiftGrab(enabled: true, mode: .appLocal) { payload in
-            handleSwiftGrabPayload(payload)
-        }
+        .swiftGrab(enabled: true, mode: .appLocal) { _ in }
     }
 
     private var activeConversationTitle: String {
@@ -129,15 +114,4 @@ struct ChatContainerView: View {
         }
     }
 
-    @MainActor
-    private func handleSwiftGrabPayload(_ payload: GrabPayload) {
-        if !payload.errors.isEmpty {
-            lastSwiftGrabStatusMessage = "Grab error"
-            return
-        }
-
-        let width = Int(payload.screenFrame.width.rounded())
-        let height = Int(payload.screenFrame.height.rounded())
-        lastSwiftGrabStatusMessage = "Grabbed \(width)x\(height)"
-    }
 }

@@ -86,6 +86,15 @@ private struct ConversationRowView: View {
             }
         }
         .contextMenu {
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(conversation.id.uuidString, forType: .string)
+            } label: {
+                Label("Copy Chat ID", systemImage: "doc.on.doc")
+            }
+
+            Divider()
+
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")
             }
