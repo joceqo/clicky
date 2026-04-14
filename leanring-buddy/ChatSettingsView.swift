@@ -14,8 +14,9 @@ import SwiftUI
 
 /// Which tab is currently active in the settings view.
 private enum SettingsTab: String, CaseIterable {
-    case profile = "Profile"
-    case general = "General"
+    case profile  = "Profile"
+    case learning = "Learning"
+    case general  = "General"
 }
 
 struct ChatSettingsView: View {
@@ -34,6 +35,10 @@ struct ChatSettingsView: View {
     @State private var profileAdditionalContext: String = ""
     @State private var profileSaveStatus: String = ""
 
+    // Learning tab state
+    @State private var learningEntries: [LearningEntry] = []
+    @State private var learningDeleteConfirmID: UUID? = nil
+
     var body: some View {
         VStack(spacing: 0) {
             tabBar
@@ -43,6 +48,8 @@ struct ChatSettingsView: View {
                     switch selectedTab {
                     case .profile:
                         profileTab
+                    case .learning:
+                        learningTab
                     case .general:
                         generalTab
                     }
@@ -66,6 +73,7 @@ struct ChatSettingsView: View {
             profileNickname = savedProfile.nickname
             profileGoals = savedProfile.goals
             profileAdditionalContext = savedProfile.additionalContext
+            learningEntries = companionManager.learningLogStore.loadAllEntries().reversed()
         }
     }
 
@@ -231,6 +239,119 @@ struct ChatSettingsView: View {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
         )
+    }
+
+    // MARK: - Learning Tab
+
+    private var learningTab: some View {
+        VStack(spacing: 16) {
+            settingsSection(title: "Learning Log") {
+                VStack(alignment: .leading, spacing: 10) {
+                    settingsHint("Clicky silently logs every topic you learn about. Use this to review, quiz yourself, or see what you haven't covered yet.")
+
+                    if learningEntries.isEmpty {
+                        settingsHint("No entries yet — start asking Clicky questions about any app or topic.")
+                            .padding(.top, 4)
+                    } else {
+                        // Group by app
+                        let grouped = Dictionary(grouping: learningEntries) { $0.app }
+                        let sortedApps = grouped.keys.sorted()
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(sortedApps, id: \.self) { app in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(app)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(DS.Colors.textSecondary)
+
+                                    ForEach(grouped[app] ?? []) { entry in
+                                        learningEntryRow(entry)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Clear all
+                        HStack {
+                            Spacer()
+                            Button(action: {
+                                companionManager.learningLogStore.clearAllEntries()
+                                learningEntries = []
+                            }) {
+                                Text("Clear all")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(DS.Colors.textTertiary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                            .fill(Color.white.opacity(0.06))
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .pointerCursor()
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+            }
+
+            settingsSection(title: "Quiz") {
+                VStack(alignment: .leading, spacing: 8) {
+                    settingsHint("Ask Clicky to quiz you on what you've learned. Type in the chat window:")
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        quizExampleRow("Quiz me on DaVinci Resolve")
+                        quizExampleRow("What did I learn this week?")
+                        quizExampleRow("What haven't I covered in Swift yet?")
+                        quizExampleRow("Summarize my Resolve knowledge")
+                    }
+                }
+            }
+        }
+    }
+
+    private func learningEntryRow(_ entry: LearningEntry) -> some View {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .none
+
+        return HStack {
+            Text(entry.topic)
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textPrimary)
+            Spacer()
+            Text(formatter.string(from: entry.date))
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textTertiary)
+            Button(action: {
+                companionManager.learningLogStore.deleteEntry(withID: entry.id)
+                learningEntries = companionManager.learningLogStore.loadAllEntries().reversed()
+            }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color.white.opacity(0.04))
+        )
+    }
+
+    private func quizExampleRow(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(DS.Colors.textTertiary)
+            Text(text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(DS.Colors.textSecondary)
+        }
     }
 
     // MARK: - General Tab

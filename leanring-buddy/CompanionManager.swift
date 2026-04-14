@@ -67,6 +67,8 @@ final class CompanionManager: ObservableObject {
     let overlayWindowManager = OverlayWindowManager()
     /// Persists conversations and screenshots to Application Support.
     let conversationStore = ConversationStore()
+    /// Persists the user's learning log to Application Support/Clicky/learning/log.json.
+    let learningLogStore = LearningLogStore()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -1046,14 +1048,35 @@ final class CompanionManager: ObservableObject {
     - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
 
-    saving notes to apple notes:
-    when the user asks you to save a note, take note of something, remember something for later, or create a note, append a note block anywhere after your spoken text (after the [POINT:...] tag is fine):
+    saving notes and logging learning:
+    when the user asks to save something, take a note, or remember something for later, append a note block after your spoken text (after the [POINT:...] tag is fine):
 
     [NOTE:short descriptive title]
-    note content here — use markdown since this is saved, not spoken. include date context if useful.
+    note content here — use markdown since this is saved, not spoken. include date context if useful. personalise the explanation to the user's level and goals from their profile.
     [/NOTE]
 
-    the note block is automatically stripped from what gets spoken aloud — never mention saving the note in your spoken response. just answer naturally and silently append the note block.
+    whenever you explain a concept, answer a how-to question, or teach the user something about an app or technology, also append a silent learning log tag:
+
+    [LOG:app-or-topic-area:specific concept]
+
+    examples:
+    - user asks about color wheels in DaVinci Resolve: [LOG:DaVinci Resolve:color wheels]
+    - user asks about Swift closures: [LOG:Swift:closures]
+    - user asks how to commit in Xcode: [LOG:Xcode:git commit]
+
+    keep the app and concept short (3-5 words each). use [LOG:] even when you don't create a [NOTE:].
+
+    opening apps and urls:
+    when the user asks to open something, append: [OPEN:url-or-app-name]
+    examples: [OPEN:https://docs.blackmagicdesign.com] or [OPEN:Xcode]
+
+    running shortcuts:
+    when the user asks to run an automation or control an app via a shortcut, append: [SHORTCUT:exact shortcut name]
+
+    creating reminders:
+    when the user asks to be reminded of something, append: [REMIND:reminder text:when (e.g. tomorrow 9am)]
+
+    all action tags are stripped from what gets spoken — never mention them in your spoken response.
     """
 
     /// Voice system prompt with the user profile prepended (if the profile has content).
@@ -1081,16 +1104,32 @@ final class CompanionManager: ObservableObject {
     - don't end with a yes/no question like "want me to explain more?" — those are dead ends. \
     if it fits, mention something bigger they could explore next.
 
-    saving notes to apple notes:
-    when the user asks you to save a note, remember something for later, or create a note, \
-    append a note block at the end of your response:
+    saving notes and logging learning:
+    when the user asks to save a note, remember something, or create a note, append a note block at the end of your response:
 
     [NOTE:short descriptive title]
-    note content here — markdown is fine since this is saved to Apple Notes, not spoken.
+    note content here — markdown is fine. personalise to the user's level and goals from their profile.
     [/NOTE]
 
-    you can briefly confirm in your response that you've saved the note (e.g. "saved to Apple Notes"). \
-    the [NOTE:...]...[/NOTE] block itself is automatically stripped before display.
+    you can briefly confirm in your response that you saved the note (e.g. "saved to Apple Notes"). \
+    the [NOTE:...]...[/NOTE] block is automatically stripped before display.
+
+    whenever you explain a concept or answer a how-to question, also append a silent learning log tag:
+
+    [LOG:app-or-topic-area:specific concept]
+
+    examples: [LOG:DaVinci Resolve:color wheels] or [LOG:Swift:closures] or [LOG:Xcode:git commit]
+
+    opening apps and urls:
+    when the user asks to open something, append: [OPEN:url-or-app-name]
+
+    running shortcuts:
+    when the user asks to run an automation, append: [SHORTCUT:exact shortcut name]
+
+    creating reminders:
+    when the user asks to be reminded of something, append: [REMIND:reminder text:when]
+
+    all action tags are stripped automatically — never mention them in your response text.
     """
 
     /// Chat system prompt with the user profile prepended (if the profile has content).
@@ -1146,16 +1185,22 @@ final class CompanionManager: ObservableObject {
 
                 let responseDuration = Date().timeIntervalSince(responseStartTime)
 
-                // Parse and strip any [NOTE:title]...[/NOTE] blocks from Claude's response.
-                // Note creation happens in the background; the display text has NOTE blocks removed.
-                let chatNoteActionResult = Self.parseAndStripNoteTags(from: fullResponseText)
-                let responseTextForDisplay = chatNoteActionResult.textWithNotesStripped
-                for note in chatNoteActionResult.notes {
+                // Strip NOTE tags first (they contain multi-line content that the action
+                // parser doesn't need to see), then run all remaining action tags through
+                // the unified ActionTagParser in one pass.
+                let chatNoteResult = Self.parseAndStripNoteTags(from: fullResponseText)
+                for note in chatNoteResult.notes {
                     createAppleNote(title: note.title, content: note.content)
                 }
 
-                // Ensure the final content is set with NOTE tags stripped (the last onTextChunk
-                // may have fired before NOTE tags were stripped, so always update here)
+                let chatActionResult = ActionTagParser.parse(from: chatNoteResult.textWithNotesStripped)
+                let responseTextForDisplay = chatActionResult.cleanedText
+
+                // Execute all extracted actions in the background
+                executeActionTags(chatActionResult, noteTitle: chatNoteResult.notes.first?.title)
+
+                // Ensure the final content is set with all tags stripped (the last onTextChunk
+                // may have fired before stripping, so always update the final content here)
                 if let messageIndex = chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
                     chatMessages[messageIndex].content = responseTextForDisplay
                     chatMessages[messageIndex].responseDurationSeconds = responseDuration
@@ -1358,17 +1403,19 @@ final class CompanionManager: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
-                // Parse and strip any [NOTE:title]...[/NOTE] blocks from Claude's response.
-                // Note creation happens in the background; the blocks are removed so they
-                // don't get spoken aloud or stored in conversation history.
-                let noteActionResult = Self.parseAndStripNoteTags(from: fullResponseText)
-                let responseTextWithoutNotes = noteActionResult.textWithNotesStripped
-                for note in noteActionResult.notes {
+                // Strip NOTE tags first (multi-line content), then run all remaining
+                // action tags through ActionTagParser in one pass, then parse POINT
+                // from the fully-cleaned text so coordinates aren't mis-parsed.
+                let voiceNoteResult = Self.parseAndStripNoteTags(from: fullResponseText)
+                for note in voiceNoteResult.notes {
                     createAppleNote(title: note.title, content: note.content)
                 }
 
-                // Parse the [POINT:...] tag from the note-stripped response
-                let parseResult = Self.parsePointingCoordinates(from: responseTextWithoutNotes)
+                let voiceActionResult = ActionTagParser.parse(from: voiceNoteResult.textWithNotesStripped)
+                executeActionTags(voiceActionResult, noteTitle: voiceNoteResult.notes.first?.title)
+
+                // Parse the [POINT:...] tag from the fully action-stripped response
+                let parseResult = Self.parsePointingCoordinates(from: voiceActionResult.cleanedText)
                 let spokenText = parseResult.spokenText
 
                 // Handle element pointing if Claude returned coordinates.
@@ -1808,6 +1855,39 @@ final class CompanionManager: ObservableObject {
             } else {
                 print("📝 Apple Note created: \"\(title)\"")
             }
+        }
+    }
+
+    // MARK: - Action Tag Execution
+
+    /// Executes all actions extracted by ActionTagParser: learning log entries,
+    /// open targets, shortcut runs, and reminders. `noteTitle` is the title of
+    /// any Apple Note created in the same response (used to link LOG entries).
+    /// All actions run in the background and never block the main actor.
+    func executeActionTags(_ actions: ParsedActionTags, noteTitle: String?) {
+        // Learning log entries — append silently, no user-visible feedback needed
+        for logEntry in actions.logEntries {
+            let entry = LearningEntry(
+                app: logEntry.app,
+                topic: logEntry.topic,
+                noteTitle: noteTitle
+            )
+            learningLogStore.append(entry)
+        }
+
+        // Open URLs or apps via NSWorkspace
+        for target in actions.openTargets {
+            ActionExecutor.openURLOrApp(target)
+        }
+
+        // Apple Shortcuts — run by name via the `shortcuts` CLI
+        for shortcutName in actions.shortcutNames {
+            ActionExecutor.runShortcut(named: shortcutName)
+        }
+
+        // Reminders via Reminders app AppleScript
+        for reminder in actions.reminders {
+            ActionExecutor.createReminder(text: reminder.text, dateHint: reminder.dateHint)
         }
     }
 

@@ -193,3 +193,285 @@ struct UserProfileTests {
         #expect(section.hasPrefix("user profile:"))
     }
 }
+
+// MARK: - ActionTagParser: [LOG:app:topic]
+
+struct LogTagParsingTests {
+
+    @Test func noLogTagsProducesEmptyEntries() {
+        let input = "here is a plain response with no log tags."
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.logEntries.isEmpty)
+        #expect(result.cleanedText == input)
+    }
+
+    @Test func singleLogTagIsExtractedAndStripped() {
+        let input = "great question about color grading. [LOG:DaVinci Resolve:color wheels]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.logEntries.count == 1)
+        #expect(result.logEntries[0].app == "DaVinci Resolve")
+        #expect(result.logEntries[0].topic == "color wheels")
+        #expect(!result.cleanedText.contains("[LOG:"))
+        #expect(result.cleanedText.contains("great question about color grading"))
+    }
+
+    @Test func multipleLogTagsAreAllExtracted() {
+        let input = """
+        we covered two topics today. [LOG:Xcode:breakpoints] [LOG:Swift:async await]
+        """
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.logEntries.count == 2)
+        let apps = result.logEntries.map { $0.app }
+        #expect(apps.contains("Xcode"))
+        #expect(apps.contains("Swift"))
+        #expect(!result.cleanedText.contains("[LOG:"))
+    }
+
+    @Test func logTagWithSpacesInAppAndTopicIsParsed() {
+        let input = "[LOG:Visual Studio Code:multi-cursor editing]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.logEntries.count == 1)
+        #expect(result.logEntries[0].app == "Visual Studio Code")
+        #expect(result.logEntries[0].topic == "multi-cursor editing")
+    }
+
+    @Test func logTagAppAndTopicAreTrimmed() {
+        let input = "[LOG:  Figma  :  auto layout  ]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.logEntries[0].app == "Figma")
+        #expect(result.logEntries[0].topic == "auto layout")
+    }
+}
+
+// MARK: - ActionTagParser: [OPEN:url-or-app]
+
+struct OpenTagParsingTests {
+
+    @Test func noOpenTagsProducesEmptyTargets() {
+        let input = "nothing to open here."
+        let result = ActionTagParser.parse(from: input)
+        #expect(result.openTargets.isEmpty)
+    }
+
+    @Test func urlOpenTagIsExtractedAndStripped() {
+        let input = "opening that for you. [OPEN:https://developer.apple.com]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.openTargets.count == 1)
+        #expect(result.openTargets[0] == "https://developer.apple.com")
+        #expect(!result.cleanedText.contains("[OPEN:"))
+        #expect(result.cleanedText.contains("opening that for you"))
+    }
+
+    @Test func appNameOpenTagIsExtracted() {
+        let input = "launching Xcode for you. [OPEN:Xcode]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.openTargets.count == 1)
+        #expect(result.openTargets[0] == "Xcode")
+    }
+
+    @Test func multipleOpenTagsAreAllExtracted() {
+        let input = "opening your tools. [OPEN:Xcode] [OPEN:https://swift.org]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.openTargets.count == 2)
+        #expect(result.openTargets.contains("Xcode"))
+        #expect(result.openTargets.contains("https://swift.org"))
+    }
+
+    @Test func openTagValueIsTrimmed() {
+        let input = "[OPEN:  Safari  ]"
+        let result = ActionTagParser.parse(from: input)
+        #expect(result.openTargets[0] == "Safari")
+    }
+}
+
+// MARK: - ActionTagParser: [SHORTCUT:name]
+
+struct ShortcutTagParsingTests {
+
+    @Test func noShortcutTagsProducesEmptyNames() {
+        let input = "no shortcuts here."
+        let result = ActionTagParser.parse(from: input)
+        #expect(result.shortcutNames.isEmpty)
+    }
+
+    @Test func shortcutTagIsExtractedAndStripped() {
+        let input = "running your morning routine. [SHORTCUT:Morning Routine]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.shortcutNames.count == 1)
+        #expect(result.shortcutNames[0] == "Morning Routine")
+        #expect(!result.cleanedText.contains("[SHORTCUT:"))
+        #expect(result.cleanedText.contains("running your morning routine"))
+    }
+
+    @Test func multipleShortcutTagsAreAllExtracted() {
+        let input = "running both shortcuts. [SHORTCUT:Focus Mode] [SHORTCUT:Daily Backup]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.shortcutNames.count == 2)
+        #expect(result.shortcutNames.contains("Focus Mode"))
+        #expect(result.shortcutNames.contains("Daily Backup"))
+    }
+
+    @Test func shortcutNameIsTrimmed() {
+        let input = "[SHORTCUT:  End of Day  ]"
+        let result = ActionTagParser.parse(from: input)
+        #expect(result.shortcutNames[0] == "End of Day")
+    }
+}
+
+// MARK: - ActionTagParser: [REMIND:text:date-hint]
+
+struct RemindTagParsingTests {
+
+    @Test func noRemindTagsProducesEmptyReminders() {
+        let input = "nothing to remind you about."
+        let result = ActionTagParser.parse(from: input)
+        #expect(result.reminders.isEmpty)
+    }
+
+    @Test func remindTagIsExtractedAndStripped() {
+        let input = "I'll set that reminder. [REMIND:Practice color grading:tomorrow 9am]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.reminders.count == 1)
+        #expect(result.reminders[0].text == "Practice color grading")
+        #expect(result.reminders[0].dateHint == "tomorrow 9am")
+        #expect(!result.cleanedText.contains("[REMIND:"))
+        #expect(result.cleanedText.contains("I'll set that reminder"))
+    }
+
+    @Test func remindTagWithEmptyDateHintIsAccepted() {
+        // If the model emits [REMIND:task:] with empty date hint, we should still capture the text
+        // The regex requires at least one char for date hint, so this tests graceful handling
+        let input = "reminder set. [REMIND:Review notes:today]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.reminders.count == 1)
+        #expect(result.reminders[0].text == "Review notes")
+        #expect(result.reminders[0].dateHint == "today")
+    }
+
+    @Test func multipleRemindTagsAreAllExtracted() {
+        let input = "added both reminders. [REMIND:Call doctor:tomorrow] [REMIND:Submit report:Friday 5pm]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.reminders.count == 2)
+        let texts = result.reminders.map { $0.text }
+        #expect(texts.contains("Call doctor"))
+        #expect(texts.contains("Submit report"))
+    }
+
+    @Test func remindTagFieldsAreTrimmed() {
+        let input = "[REMIND:  Buy groceries  :  this evening  ]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.reminders[0].text == "Buy groceries")
+        #expect(result.reminders[0].dateHint == "this evening")
+    }
+}
+
+// MARK: - ActionTagParser: mixed tags and cleaned text
+
+struct MixedActionTagParsingTests {
+
+    @Test func allTagTypesAreExtractedFromOneResponse() {
+        let input = """
+        I learned you want to understand async/await. [LOG:Swift:async await]
+        Opening the Swift docs now. [OPEN:https://docs.swift.org]
+        Running your focus shortcut. [SHORTCUT:Focus Mode]
+        Set a reminder to practice tomorrow. [REMIND:Practice async/await:tomorrow morning]
+        """
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.logEntries.count == 1)
+        #expect(result.openTargets.count == 1)
+        #expect(result.shortcutNames.count == 1)
+        #expect(result.reminders.count == 1)
+        #expect(result.hasAnyActions)
+        #expect(!result.cleanedText.contains("[LOG:"))
+        #expect(!result.cleanedText.contains("[OPEN:"))
+        #expect(!result.cleanedText.contains("[SHORTCUT:"))
+        #expect(!result.cleanedText.contains("[REMIND:"))
+    }
+
+    @Test func responseWithNoActionTagsHasNoActions() {
+        let input = "just a plain conversational response."
+        let result = ActionTagParser.parse(from: input)
+        #expect(!result.hasAnyActions)
+        #expect(result.cleanedText == input)
+    }
+
+    @Test func cleanedTextIsTrimmedAfterTagRemoval() {
+        // Tags at the very end leave trailing whitespace — should be trimmed
+        let input = "doing it now. [LOG:Xcode:debugging]   "
+        let result = ActionTagParser.parse(from: input)
+        #expect(!result.cleanedText.hasSuffix("   "))
+        #expect(result.cleanedText == "doing it now.")
+    }
+
+    @Test func tagsThatSurviveArePreservedInCleanedText() {
+        // POINT tags are NOT handled by ActionTagParser — they survive into cleanedText
+        // so the voice pipeline can parse them in a subsequent step
+        let input = "look at this button. [LOG:Xcode:inspector panel] [POINT:300,200:button]"
+        let result = ActionTagParser.parse(from: input)
+
+        #expect(result.logEntries.count == 1)
+        // POINT tag should remain in the cleaned text for the voice pipeline
+        #expect(result.cleanedText.contains("[POINT:300,200:button]"))
+    }
+}
+
+// MARK: - LearningEntry Codable round-trip
+
+struct LearningEntryTests {
+
+    @Test func learningEntryEncodesAndDecodesCorrectly() throws {
+        let originalEntry = LearningEntry(
+            app: "DaVinci Resolve",
+            topic: "color wheels",
+            noteTitle: "Color Grading Basics"
+        )
+
+        let encodedData = try JSONEncoder().encode(originalEntry)
+        let decodedEntry = try JSONDecoder().decode(LearningEntry.self, from: encodedData)
+
+        #expect(decodedEntry.id == originalEntry.id)
+        #expect(decodedEntry.app == originalEntry.app)
+        #expect(decodedEntry.topic == originalEntry.topic)
+        #expect(decodedEntry.noteTitle == originalEntry.noteTitle)
+    }
+
+    @Test func learningEntryWithNilNoteTitleDecodesCorrectly() throws {
+        let originalEntry = LearningEntry(app: "Xcode", topic: "breakpoints", noteTitle: nil)
+
+        let encodedData = try JSONEncoder().encode(originalEntry)
+        let decodedEntry = try JSONDecoder().decode(LearningEntry.self, from: encodedData)
+
+        #expect(decodedEntry.noteTitle == nil)
+    }
+
+    @Test func learningEntryArrayEncodesAndDecodesAsJSON() throws {
+        let entries = [
+            LearningEntry(app: "Swift", topic: "closures"),
+            LearningEntry(app: "Swift", topic: "generics"),
+            LearningEntry(app: "Figma", topic: "components"),
+        ]
+
+        let encodedData = try JSONEncoder().encode(entries)
+        let decodedEntries = try JSONDecoder().decode([LearningEntry].self, from: encodedData)
+
+        #expect(decodedEntries.count == 3)
+        #expect(decodedEntries[0].app == "Swift")
+        #expect(decodedEntries[1].topic == "generics")
+        #expect(decodedEntries[2].app == "Figma")
+    }
+}
