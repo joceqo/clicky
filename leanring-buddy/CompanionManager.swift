@@ -80,6 +80,40 @@ final class CompanionManager: ObservableObject {
         return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
     }()
 
+    private lazy var supertonicTTSClient: SupertonicTTSClient = {
+        return SupertonicTTSClient()
+    }()
+
+    /// Which TTS backend to use for voice responses. "elevenlabs" or "supertonic".
+    /// Persisted to UserDefaults so the choice survives app restarts.
+    @Published var selectedTTSProvider: String = UserDefaults.standard.string(forKey: "selectedTTSProvider") ?? "elevenlabs"
+
+    func setSelectedTTSProvider(_ provider: String) {
+        stopActiveTTSPlayback()
+        selectedTTSProvider = provider
+        UserDefaults.standard.set(provider, forKey: "selectedTTSProvider")
+    }
+
+    /// Which STT backend to use for voice transcription. "assemblyai" or "parakeet".
+    /// Persisted to UserDefaults so the choice survives app restarts.
+    @Published var selectedSTTProvider: String = UserDefaults.standard.string(forKey: "selectedSTTProvider") ?? "assemblyai"
+
+    func setSelectedSTTProvider(_ provider: String) {
+        selectedSTTProvider = provider
+        UserDefaults.standard.set(provider, forKey: "selectedSTTProvider")
+
+        let providerInstance: any BuddyTranscriptionProvider
+        switch provider {
+        case "parakeet":
+            providerInstance = BuddyTranscriptionProviderFactory.makeProvider(
+                for: .parakeet)
+        default:
+            providerInstance = BuddyTranscriptionProviderFactory.makeProvider(
+                for: .assemblyAI)
+        }
+        buddyDictationManager.switchTranscriptionProvider(to: providerInstance)
+    }
+
     /// Conversation history so Claude remembers prior exchanges within a session.
     /// Each entry is the user's transcript and Claude's response.
     private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
@@ -295,6 +329,8 @@ final class CompanionManager: ObservableObject {
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        elevenLabsTTSClient.stopPlayback()
+        supertonicTTSClient.stopPlayback()
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
         audioPowerCancellable?.cancel()
@@ -493,7 +529,7 @@ final class CompanionManager: ObservableObject {
 
             // Cancel any in-progress response and TTS from a previous utterance
             currentResponseTask?.cancel()
-            elevenLabsTTSClient.stopPlayback()
+            stopActiveTTSPlayback()
             clearDetectedElementLocation()
 
             // Dismiss the onboarding prompt if it's showing
@@ -701,12 +737,12 @@ final class CompanionManager: ObservableObject {
                 // until the audio actually starts playing, then switch to responding.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     do {
-                        try await elevenLabsTTSClient.speakText(spokenText)
+                        try await speakTextWithActiveTTSProvider(spokenText)
                         // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
                     } catch {
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
-                        print("⚠️ ElevenLabs TTS error: \(error)")
+                        print("⚠️ TTS error (\(selectedTTSProvider)): \(error)")
                         speakCreditsErrorFallback()
                     }
                 }
@@ -735,7 +771,7 @@ final class CompanionManager: ObservableObject {
         transientHideTask?.cancel()
         transientHideTask = Task {
             // Wait for TTS audio to finish playing
-            while elevenLabsTTSClient.isPlaying {
+            while isActiveTTSPlaying {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard !Task.isCancelled else { return }
             }
@@ -752,6 +788,35 @@ final class CompanionManager: ObservableObject {
             guard !Task.isCancelled else { return }
             overlayWindowManager.fadeOutAndHideOverlay()
             isOverlayVisible = false
+        }
+    }
+
+    // MARK: - TTS Provider Helpers
+
+    /// Routes a speak call to whichever TTS backend is currently selected.
+    private func speakTextWithActiveTTSProvider(_ text: String) async throws {
+        if selectedTTSProvider == "supertonic" {
+            try await supertonicTTSClient.speakText(text)
+        } else {
+            try await elevenLabsTTSClient.speakText(text)
+        }
+    }
+
+    /// Stops playback on whichever TTS backend is currently active.
+    private func stopActiveTTSPlayback() {
+        if selectedTTSProvider == "supertonic" {
+            supertonicTTSClient.stopPlayback()
+        } else {
+            elevenLabsTTSClient.stopPlayback()
+        }
+    }
+
+    /// True if the currently selected TTS backend has audio playing.
+    private var isActiveTTSPlaying: Bool {
+        if selectedTTSProvider == "supertonic" {
+            return supertonicTTSClient.isPlaying
+        } else {
+            return elevenLabsTTSClient.isPlaying
         }
     }
 
