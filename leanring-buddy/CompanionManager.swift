@@ -418,6 +418,25 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    // MARK: - User Profile
+
+    /// The user's personal context card (name, goals, extra notes). When filled in,
+    /// this gets prepended to every Claude system prompt so responses are personalized
+    /// and goal-aware from the very first message.
+    @Published var userProfile: UserProfile = UserProfile.load()
+
+    func saveUserProfile(_ updatedProfile: UserProfile) {
+        userProfile = updatedProfile
+        updatedProfile.save()
+    }
+
+    /// Prepends the user profile block to a base system prompt when the profile
+    /// has any content. Returns the base prompt unchanged when the profile is empty.
+    private func buildSystemPromptWithUserProfile(_ baseSystemPrompt: String) -> String {
+        guard userProfile.hasAnyContent else { return baseSystemPrompt }
+        return userProfile.buildSystemPromptSection() + "\n" + baseSystemPrompt
+    }
+
     /// Whether the user has completed onboarding at least once. Persisted
     /// to UserDefaults so the Start button only appears on first launch.
     var hasCompletedOnboarding: Bool {
@@ -990,7 +1009,9 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Companion Prompt
 
-    private static let companionVoiceResponseSystemPrompt = """
+    /// Base voice system prompt. User profile is prepended at call time via
+    /// `companionVoiceResponseSystemPrompt` (the instance computed var below).
+    private static let companionVoiceResponseBaseSystemPrompt = """
     you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
@@ -1024,12 +1045,26 @@ final class CompanionManager: ObservableObject {
     - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
     - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
+
+    saving notes to apple notes:
+    when the user asks you to save a note, take note of something, remember something for later, or create a note, append a note block anywhere after your spoken text (after the [POINT:...] tag is fine):
+
+    [NOTE:short descriptive title]
+    note content here — use markdown since this is saved, not spoken. include date context if useful.
+    [/NOTE]
+
+    the note block is automatically stripped from what gets spoken aloud — never mention saving the note in your spoken response. just answer naturally and silently append the note block.
     """
 
-    /// System prompt for text-chat mode (chat window).
-    /// Unlike the voice prompt, this allows longer responses, encourages markdown
-    /// formatting, and omits the POINT tag instructions (no cursor overlay in chat).
-    private static let companionChatSystemPrompt = """
+    /// Voice system prompt with the user profile prepended (if the profile has content).
+    /// This is the prompt actually sent to Claude for voice exchanges.
+    private var companionVoiceResponseSystemPrompt: String {
+        buildSystemPromptWithUserProfile(Self.companionVoiceResponseBaseSystemPrompt)
+    }
+
+    /// Base chat system prompt. User profile is prepended at call time via
+    /// `companionChatSystemPrompt` (the instance computed var below).
+    private static let companionChatBaseSystemPrompt = """
     you're clicky, a friendly always-on companion that lives in the user's menu bar. \
     the user is chatting with you via text in the clicky chat window. \
     this is an ongoing conversation — you remember everything said before in this session, \
@@ -1045,7 +1080,24 @@ final class CompanionManager: ObservableObject {
     - you can help with anything — coding, writing, analysis, general knowledge, brainstorming.
     - don't end with a yes/no question like "want me to explain more?" — those are dead ends. \
     if it fits, mention something bigger they could explore next.
+
+    saving notes to apple notes:
+    when the user asks you to save a note, remember something for later, or create a note, \
+    append a note block at the end of your response:
+
+    [NOTE:short descriptive title]
+    note content here — markdown is fine since this is saved to Apple Notes, not spoken.
+    [/NOTE]
+
+    you can briefly confirm in your response that you've saved the note (e.g. "saved to Apple Notes"). \
+    the [NOTE:...]...[/NOTE] block itself is automatically stripped before display.
     """
+
+    /// Chat system prompt with the user profile prepended (if the profile has content).
+    /// This is the prompt actually sent to Claude for text chat exchanges.
+    private var companionChatSystemPrompt: String {
+        buildSystemPromptWithUserProfile(Self.companionChatBaseSystemPrompt)
+    }
 
     // MARK: - Text Chat Pipeline
 
@@ -1079,7 +1131,7 @@ final class CompanionManager: ObservableObject {
 
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: [],
-                    systemPrompt: Self.companionChatSystemPrompt,
+                    systemPrompt: companionChatSystemPrompt,
                     conversationHistory: historyForAPI,
                     userPrompt: userText,
                     onTextChunk: { [weak self] accumulatedText in
@@ -1094,18 +1146,28 @@ final class CompanionManager: ObservableObject {
 
                 let responseDuration = Date().timeIntervalSince(responseStartTime)
 
-                // Ensure the final content is set (the last onTextChunk may not have
-                // fired if the stream ended without a trailing chunk)
+                // Parse and strip any [NOTE:title]...[/NOTE] blocks from Claude's response.
+                // Note creation happens in the background; the display text has NOTE blocks removed.
+                let chatNoteActionResult = Self.parseAndStripNoteTags(from: fullResponseText)
+                let responseTextForDisplay = chatNoteActionResult.textWithNotesStripped
+                for note in chatNoteActionResult.notes {
+                    createAppleNote(title: note.title, content: note.content)
+                }
+
+                // Ensure the final content is set with NOTE tags stripped (the last onTextChunk
+                // may have fired before NOTE tags were stripped, so always update here)
                 if let messageIndex = chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
-                    chatMessages[messageIndex].content = fullResponseText
+                    chatMessages[messageIndex].content = responseTextForDisplay
                     chatMessages[messageIndex].responseDurationSeconds = responseDuration
                 }
 
                 // Share this exchange with the conversation history so future requests
-                // (voice or text) have context for what was already discussed
+                // (voice or text) have context for what was already discussed.
+                // Store the display text (with NOTE tags stripped) rather than the raw
+                // response so NOTE blocks don't pollute future conversation context.
                 conversationHistory.append((
                     userTranscript: userText,
-                    assistantResponse: fullResponseText
+                    assistantResponse: responseTextForDisplay
                 ))
                 if conversationHistory.count > 10 {
                     conversationHistory.removeFirst(conversationHistory.count - 10)
@@ -1252,7 +1314,7 @@ final class CompanionManager: ObservableObject {
                     let lmStudioStartTime = Date()
                     let (responseText, _) = try await lmStudioAPI.analyzeImageStreaming(
                         images: labeledImages,
-                        systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                        systemPrompt: companionVoiceResponseSystemPrompt,
                         conversationHistory: historyForAPI,
                         userPrompt: userPromptWithScreenContext,
                         onTextChunk: { _ in
@@ -1284,7 +1346,7 @@ final class CompanionManager: ObservableObject {
 
                     let (responseText, _) = try await claudeAPI.analyzeImageStreaming(
                         images: labeledImages,
-                        systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                        systemPrompt: companionVoiceResponseSystemPrompt,
                         conversationHistory: historyForAPI,
                         userPrompt: transcript,
                         onTextChunk: { _ in
@@ -1296,8 +1358,17 @@ final class CompanionManager: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
-                // Parse the [POINT:...] tag from Claude's response
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+                // Parse and strip any [NOTE:title]...[/NOTE] blocks from Claude's response.
+                // Note creation happens in the background; the blocks are removed so they
+                // don't get spoken aloud or stored in conversation history.
+                let noteActionResult = Self.parseAndStripNoteTags(from: fullResponseText)
+                let responseTextWithoutNotes = noteActionResult.textWithNotesStripped
+                for note in noteActionResult.notes {
+                    createAppleNote(title: note.title, content: note.content)
+                }
+
+                // Parse the [POINT:...] tag from the note-stripped response
+                let parseResult = Self.parsePointingCoordinates(from: responseTextWithoutNotes)
                 let spokenText = parseResult.spokenText
 
                 // Handle element pointing if Claude returned coordinates.
@@ -1655,6 +1726,89 @@ final class CompanionManager: ObservableObject {
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
+    }
+
+    // MARK: - Note Tag Parsing + Apple Notes Creation
+
+    /// Result of stripping [NOTE:title]...[/NOTE] blocks from a Claude response.
+    struct NoteActionResult {
+        /// The response text with all NOTE blocks removed and trimmed.
+        let textWithNotesStripped: String
+        /// Each note extracted from the response, in the order they appeared.
+        let notes: [(title: String, content: String)]
+    }
+
+    /// Finds all [NOTE:title]content[/NOTE] blocks in Claude's response,
+    /// extracts their title and content, and returns the response with those
+    /// blocks fully removed. Safe to call with responses that contain zero blocks.
+    static func parseAndStripNoteTags(from responseText: String) -> NoteActionResult {
+        let notePattern = #"\[NOTE:([^\]]+)\]([\s\S]*?)\[/NOTE\]"#
+        guard let noteRegex = try? NSRegularExpression(pattern: notePattern, options: []) else {
+            return NoteActionResult(textWithNotesStripped: responseText, notes: [])
+        }
+
+        let nsRange = NSRange(responseText.startIndex..., in: responseText)
+        let matches = noteRegex.matches(in: responseText, range: nsRange)
+
+        var extractedNotes: [(title: String, content: String)] = []
+        for match in matches {
+            guard let titleRange = Range(match.range(at: 1), in: responseText),
+                  let contentRange = Range(match.range(at: 2), in: responseText) else { continue }
+            let title = String(responseText[titleRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let content = String(responseText[contentRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            extractedNotes.append((title: title, content: content))
+        }
+
+        // Replace all NOTE blocks with empty string in one pass
+        let strippedText = noteRegex
+            .stringByReplacingMatches(in: responseText, range: nsRange, withTemplate: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return NoteActionResult(textWithNotesStripped: strippedText, notes: extractedNotes)
+    }
+
+    /// Creates a new note in Apple Notes via AppleScript.
+    /// Runs on a background thread so it never blocks the UI or TTS playback.
+    /// The title stays on one line; newlines in the content become AppleScript
+    /// `& return &` concatenations since AppleScript strings can't span lines.
+    func createAppleNote(title: String, content: String) {
+        // Escape backslashes and double-quotes for embedding in AppleScript string literals.
+        let escapedTitle = title
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: " ") // titles are single-line
+
+        let escapedContent = content
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            // AppleScript string literals can't contain literal newlines —
+            // break them into concatenated strings joined by `return`.
+            .replacingOccurrences(of: "\n", with: "\" & return & \"")
+
+        let appleScriptSource = """
+        tell application "Notes"
+            make new note at folder "Notes" with properties {name:"\(escapedTitle)", body:"\(escapedContent)"}
+        end tell
+        """
+
+        // NSAppleScript.executeAndReturnError is synchronous and can take up to
+        // a second while Notes processes the request. Dispatch to a background
+        // queue to keep the main actor (and TTS playback) unblocked.
+        DispatchQueue.global(qos: .utility).async {
+            var errorInfo: NSDictionary?
+            guard let script = NSAppleScript(source: appleScriptSource) else {
+                print("⚠️ Apple Notes: failed to create NSAppleScript for note \"\(title)\"")
+                return
+            }
+            script.executeAndReturnError(&errorInfo)
+            if let errorInfo {
+                print("⚠️ Apple Notes creation failed for \"\(title)\": \(errorInfo)")
+            } else {
+                print("📝 Apple Note created: \"\(title)\"")
+            }
+        }
     }
 
     // MARK: - Point Tag Parsing

@@ -17,9 +17,16 @@ struct ChatSettingsView: View {
     @State private var apiKeyInput = ""
     @State private var isAPIKeyVisible = false
 
+    // Profile section state — pre-filled from companionManager.userProfile on appear
+    @State private var profileNickname: String = ""
+    @State private var profileGoals: String = ""
+    @State private var profileAdditionalContext: String = ""
+    @State private var profileSaveStatus: String = ""
+
     var body: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 24) {
+                profileSection
                 modelSection
                 voiceSection
                 speechSection
@@ -38,7 +45,143 @@ struct ChatSettingsView: View {
                 apiKeyInput = companionManager.anthropicAPIKey
             }
             companionManager.fetchAvailableLMStudioModels()
+            // Pre-fill profile fields from the saved profile
+            let savedProfile = companionManager.userProfile
+            profileNickname = savedProfile.nickname
+            profileGoals = savedProfile.goals
+            profileAdditionalContext = savedProfile.additionalContext
         }
+    }
+
+    // MARK: - Profile
+
+    /// A personal context card that gets prepended to every Claude system prompt.
+    /// The more the user fills in, the more Clicky can personalize its responses
+    /// and keep conversations oriented around their actual goals.
+    private var profileSection: some View {
+        settingsSection(title: "Profile") {
+            VStack(alignment: .leading, spacing: 12) {
+                settingsHint("Tell Clicky who you are. This gets added to every conversation so responses are always personalized to you.")
+
+                // Nickname
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Your name")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    TextField("e.g. joce", text: $profileNickname)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.white.opacity(0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                        )
+                }
+
+                // Goals
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Goals")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    settingsHint("What you want to get better at or accomplish")
+
+                    profileTextEditor(
+                        placeholder: "e.g. get better at coding, create nice projects, do more with less",
+                        text: $profileGoals,
+                        minHeight: 56
+                    )
+                }
+
+                // Additional context
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Additional context")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    settingsHint("Preferred tools, learning style, current projects — anything useful")
+
+                    profileTextEditor(
+                        placeholder: "e.g. I'm learning DaVinci Resolve. I prefer concise answers with examples.",
+                        text: $profileAdditionalContext,
+                        minHeight: 72
+                    )
+                }
+
+                // Save button + status
+                HStack {
+                    if !profileSaveStatus.isEmpty {
+                        settingsHint(profileSaveStatus)
+                    }
+                    Spacer()
+                    Button(action: saveProfile) {
+                        Text("Save")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(DS.Colors.textPrimary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(DS.Colors.accent.opacity(0.85))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                }
+            }
+        }
+    }
+
+    private func saveProfile() {
+        let updatedProfile = UserProfile(
+            nickname: profileNickname,
+            goals: profileGoals,
+            additionalContext: profileAdditionalContext
+        )
+        companionManager.saveUserProfile(updatedProfile)
+        profileSaveStatus = "Saved"
+        // Clear the status after 2 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            profileSaveStatus = ""
+        }
+    }
+
+    /// A styled multi-line text editor for profile fields. SwiftUI's TextEditor doesn't
+    /// support placeholder text natively, so we layer a hint label behind it.
+    private func profileTextEditor(placeholder: String, text: Binding<String>, minHeight: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            if text.wrappedValue.isEmpty {
+                Text(placeholder)
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 10)
+                    .allowsHitTesting(false)
+            }
+
+            TextEditor(text: text)
+                .font(.system(size: 12))
+                .foregroundColor(DS.Colors.textPrimary)
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .frame(minHeight: minHeight)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
     }
 
     // MARK: - Model
