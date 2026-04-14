@@ -82,6 +82,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `ParakeetTranscriptionProvider.swift` | ~160 | On-device ASR provider using NVIDIA Parakeet via FluidAudio (CoreML/ANE). Implements `BuddyTranscriptionProvider` with the same buffer-then-transcribe pattern as the OpenAI provider. No API key required. |
 | `TextExtractor.swift` | ~290 | Extracts visible text from the frontmost app using two strategies: Accessibility API (primary, reads AXUIElement text + word bounds) and Vision OCR (fallback for Chrome/Electron). Used by the Apple Intelligence and LM Studio pipelines to give local models screen context without image encoding. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
+| `UserProfile.swift` | ~70 | User personal context card — nickname, goals, additional context. Persisted to UserDefaults as JSON. Prepended to every Claude system prompt so responses are always personalized. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `KeychainHelper.swift` | ~95 | Minimal Keychain wrapper for secure API key storage. Handles save/load/delete and one-time migration from UserDefaults. |
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
