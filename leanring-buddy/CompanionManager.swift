@@ -65,8 +65,8 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
-    /// Persists chat history (JSON) and screenshots to Application Support.
-    let chatHistoryStore = ChatHistoryStore()
+    /// Persists conversations and screenshots to Application Support.
+    let conversationStore = ConversationStore()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -75,13 +75,13 @@ final class CompanionManager: ObservableObject {
 
     /// User-provided Anthropic API key for direct mode (no Worker needed).
     /// When set, Claude requests go straight to api.anthropic.com.
-    /// Persisted to UserDefaults so it survives app restarts.
-    @Published var anthropicAPIKey: String = UserDefaults.standard.string(forKey: "anthropicAPIKey") ?? ""
+    /// Persisted to Keychain so it survives app restarts and stays secure.
+    @Published var anthropicAPIKey: String = KeychainHelper.load(forKey: "anthropicAPIKey")
 
     func setAnthropicAPIKey(_ key: String) {
         let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
         anthropicAPIKey = trimmedKey
-        UserDefaults.standard.set(trimmedKey, forKey: "anthropicAPIKey")
+        KeychainHelper.save(trimmedKey, forKey: "anthropicAPIKey")
         // Recreate the Claude client to use direct mode (or fall back to proxy)
         claudeAPI = makeClaudeAPI()
     }
@@ -141,13 +141,13 @@ final class CompanionManager: ObservableObject {
     // MARK: - LM Studio Configuration
 
     /// User-provided LM Studio API key (optional — many local setups don't require one).
-    /// Persisted to UserDefaults so it survives app restarts.
-    @Published var lmStudioAPIKey: String = UserDefaults.standard.string(forKey: "lmStudioAPIKey") ?? ""
+    /// Persisted to Keychain so it survives app restarts and stays secure.
+    @Published var lmStudioAPIKey: String = KeychainHelper.load(forKey: "lmStudioAPIKey")
 
     func setLMStudioAPIKey(_ key: String) {
         let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
         lmStudioAPIKey = trimmedKey
-        UserDefaults.standard.set(trimmedKey, forKey: "lmStudioAPIKey")
+        KeychainHelper.save(trimmedKey, forKey: "lmStudioAPIKey")
         lmStudioAPI.apiKey = trimmedKey
     }
 
@@ -271,7 +271,14 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    /// All messages in the Clicky chat window, ordered oldest-first.
+    /// All conversations, sorted by most recent activity. Drives the sidebar.
+    @Published var conversations: [Conversation] = []
+
+    /// The ID of the currently active conversation. Messages shown in the
+    /// chat window belong to this conversation.
+    @Published var activeConversationID: UUID?
+
+    /// All messages in the active conversation, ordered oldest-first.
     /// Includes both voice (push-to-talk) and text (typed) exchanges so the
     /// chat window shows the full session history regardless of input method.
     @Published var chatMessages: [ChatMessage] = []
@@ -283,6 +290,18 @@ final class CompanionManager: ObservableObject {
 
     /// The Claude model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+
+    /// The actual model identifier to store in message metadata. For Claude models
+    /// this is the model ID (e.g. "claude-sonnet-4-6"). For LM Studio, this is the
+    /// real model name (e.g. "gemma-4-2b") so the JSON log is useful for debugging.
+    var resolvedModelIDForMessages: String {
+        switch selectedModel {
+        case "lmstudio":
+            return selectedLMStudioModel.isEmpty ? "lmstudio" : selectedLMStudioModel
+        default:
+            return selectedModel
+        }
+    }
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
@@ -350,8 +369,22 @@ final class CompanionManager: ObservableObject {
     }
 
     func start() {
-        // Restore persisted chat history so the chat window shows previous sessions
-        chatMessages = chatHistoryStore.loadHistory()
+        // Migrate API keys from UserDefaults to Keychain (one-time, safe to call every launch)
+        KeychainHelper.migrateFromUserDefaultsIfNeeded(userDefaultsKey: "anthropicAPIKey", keychainKey: "anthropicAPIKey")
+        KeychainHelper.migrateFromUserDefaultsIfNeeded(userDefaultsKey: "lmStudioAPIKey", keychainKey: "lmStudioAPIKey")
+        // Re-read from Keychain in case migration just happened
+        anthropicAPIKey = KeychainHelper.load(forKey: "anthropicAPIKey")
+        lmStudioAPIKey = KeychainHelper.load(forKey: "lmStudioAPIKey")
+
+        // Migrate legacy single-history format if needed, then load conversations
+        conversationStore.migrateFromLegacyHistoryIfNeeded()
+        conversations = conversationStore.loadConversationsIndex()
+
+        if let mostRecentConversation = conversations.first {
+            switchToConversation(mostRecentConversation.id)
+        } else {
+            createNewConversation()
+        }
 
         refreshAllPermissions()
         print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
@@ -379,6 +412,131 @@ final class CompanionManager: ObservableObject {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
+        }
+    }
+
+    // MARK: - Conversation Management
+
+    /// Switches to a different conversation, saving the current one first.
+    /// Rebuilds the API conversation history from the loaded messages so
+    /// Claude has context within the new conversation.
+    func switchToConversation(_ conversationID: UUID) {
+        guard conversationID != activeConversationID else { return }
+        guard !isSendingChatMessage else { return }
+
+        // Save current conversation before switching away
+        saveActiveConversationToDisk()
+
+        activeConversationID = conversationID
+        chatMessages = conversationStore.loadMessages(for: conversationID)
+
+        // Rebuild the in-memory API context from the loaded messages so Claude
+        // has conversational context within this conversation (not cross-conversation)
+        rebuildConversationHistoryFromChatMessages()
+    }
+
+    /// Creates a new empty conversation, prepends it to the sidebar list,
+    /// and makes it active.
+    func createNewConversation() {
+        // Save current conversation before switching away
+        saveActiveConversationToDisk()
+
+        let newConversation = conversationStore.createConversation()
+        conversations.insert(newConversation, at: 0)
+        conversationStore.saveConversationsIndex(conversations)
+
+        activeConversationID = newConversation.id
+        chatMessages = []
+        conversationHistory = []
+    }
+
+    /// Deletes a conversation from disk and the sidebar list. If the deleted
+    /// conversation was active, switches to the most recent remaining one
+    /// or creates a new empty conversation.
+    func deleteConversation(_ conversationID: UUID) {
+        conversationStore.deleteConversation(id: conversationID)
+        conversations.removeAll { $0.id == conversationID }
+        conversationStore.saveConversationsIndex(conversations)
+
+        if conversationID == activeConversationID {
+            if let mostRecent = conversations.first {
+                activeConversationID = nil // Force switchToConversation to proceed
+                switchToConversation(mostRecent.id)
+            } else {
+                activeConversationID = nil
+                createNewConversation()
+            }
+        }
+    }
+
+    /// Persists the current active conversation's messages and updates
+    /// its metadata in the index.
+    private func saveActiveConversationToDisk() {
+        guard let activeID = activeConversationID else { return }
+        conversationStore.saveMessages(chatMessages, for: activeID)
+        updateConversationMetadata(for: activeID)
+    }
+
+    /// Updates the metadata (updatedAt, messageCount) for a conversation
+    /// in the index and saves the index to disk.
+    private func updateConversationMetadata(for conversationID: UUID) {
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        conversations[conversationIndex].updatedAt = Date()
+        conversations[conversationIndex].messageCount = chatMessages.count
+        conversationStore.saveConversationsIndex(conversations)
+    }
+
+    /// Auto-titles a conversation from the first user message if the title
+    /// is still the default "New Chat".
+    private func autoTitleActiveConversationIfNeeded(from userText: String) {
+        guard let activeID = activeConversationID,
+              let conversationIndex = conversations.firstIndex(where: { $0.id == activeID }),
+              conversations[conversationIndex].title == "New Chat"
+        else { return }
+
+        let trimmedText = userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+
+        // Truncate to ~40 characters at a word boundary
+        let title: String
+        if trimmedText.count <= 40 {
+            title = trimmedText
+        } else {
+            let prefix = String(trimmedText.prefix(40))
+            if let lastSpace = prefix.lastIndex(of: " ") {
+                title = String(prefix[prefix.startIndex..<lastSpace])
+            } else {
+                title = prefix
+            }
+        }
+
+        conversations[conversationIndex].title = title
+    }
+
+    /// Rebuilds the in-memory `conversationHistory` (used for Claude API context)
+    /// from the current `chatMessages`. Takes the last 10 user-assistant pairs.
+    private func rebuildConversationHistoryFromChatMessages() {
+        conversationHistory = []
+
+        var pairIndex = 0
+        while pairIndex < chatMessages.count {
+            let message = chatMessages[pairIndex]
+            if message.role == .user,
+               pairIndex + 1 < chatMessages.count,
+               chatMessages[pairIndex + 1].role == .assistant {
+                conversationHistory.append((
+                    userTranscript: message.content,
+                    assistantResponse: chatMessages[pairIndex + 1].content
+                ))
+                pairIndex += 2
+            } else {
+                pairIndex += 1
+            }
+        }
+
+        // Keep only the last 10 exchanges
+        if conversationHistory.count > 10 {
+            conversationHistory.removeFirst(conversationHistory.count - 10)
         }
     }
 
@@ -802,7 +960,7 @@ final class CompanionManager: ObservableObject {
 
         // Append an empty assistant placeholder that streaming will fill in.
         // The chat view shows a typing indicator while this message has no content.
-        let assistantPlaceholder = ChatMessage(role: .assistant, content: "", source: .text)
+        let assistantPlaceholder = ChatMessage(role: .assistant, content: "", source: .text, modelID: resolvedModelIDForMessages)
         chatMessages.append(assistantPlaceholder)
         let assistantPlaceholderID = assistantPlaceholder.id
 
@@ -849,8 +1007,14 @@ final class CompanionManager: ObservableObject {
 
                 print("🧠 Chat message sent. Conversation history: \(conversationHistory.count) exchanges")
 
-                // Persist the updated message list to disk
-                chatHistoryStore.saveHistory(chatMessages)
+                // Auto-title the conversation from the first user message
+                autoTitleActiveConversationIfNeeded(from: userText)
+
+                // Persist the updated message list and metadata to disk
+                if let activeID = activeConversationID {
+                    conversationStore.saveMessages(chatMessages, for: activeID)
+                    updateConversationMetadata(for: activeID)
+                }
 
             } catch {
                 // Replace the empty placeholder with a user-visible error so the
@@ -1095,6 +1259,9 @@ final class CompanionManager: ObservableObject {
                     conversationHistory.removeFirst(conversationHistory.count - 10)
                 }
 
+                // Auto-title the conversation from the first voice transcript
+                autoTitleActiveConversationIfNeeded(from: transcript)
+
                 // Mirror the voice exchange into chatMessages immediately so the chat
                 // window updates without waiting for screenshot compression to finish.
                 // The user message gets a pre-assigned UUID so screenshot files can be
@@ -1107,15 +1274,20 @@ final class CompanionManager: ObservableObject {
                     source: .voice,
                     ocrText: extractedScreenText
                 ))
-                chatMessages.append(ChatMessage(role: .assistant, content: spokenText, source: .voice))
+                chatMessages.append(ChatMessage(role: .assistant, content: spokenText, source: .voice, modelID: resolvedModelIDForMessages))
+
+                // Capture the active conversation ID now so the background screenshot
+                // save writes to the correct conversation even if the user switches
+                // conversations while TTS is playing.
+                let conversationIDForSave = activeConversationID
 
                 // Compress and save screenshots in a background task so it doesn't
                 // delay TTS playback. Once saved, update the message with file names
-                // and persist the full history JSON.
+                // and persist the conversation to disk.
                 let rawCaptureDataItems = screenCaptures.map { $0.imageData }
                 Task.detached(priority: .utility) { [weak self] in
                     guard let self else { return }
-                    let savedFileNames = self.chatHistoryStore.saveCompressedScreenshots(
+                    let savedFileNames = self.conversationStore.saveCompressedScreenshots(
                         rawCaptureDataItems,
                         forMessageWithID: voiceUserMessageID
                     )
@@ -1123,7 +1295,22 @@ final class CompanionManager: ObservableObject {
                         if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == voiceUserMessageID }) {
                             self.chatMessages[messageIndex].screenshotFileNames = savedFileNames
                         }
-                        self.chatHistoryStore.saveHistory(self.chatMessages)
+                        // Save to the conversation that was active when the voice
+                        // pipeline started, not necessarily the current active one
+                        if let saveID = conversationIDForSave {
+                            if saveID == self.activeConversationID {
+                                // Still on the same conversation — save chatMessages directly
+                                self.conversationStore.saveMessages(self.chatMessages, for: saveID)
+                                self.updateConversationMetadata(for: saveID)
+                            } else {
+                                // User switched away — load, patch, and save the original conversation
+                                var originalMessages = self.conversationStore.loadMessages(for: saveID)
+                                if let messageIndex = originalMessages.firstIndex(where: { $0.id == voiceUserMessageID }) {
+                                    originalMessages[messageIndex].screenshotFileNames = savedFileNames
+                                }
+                                self.conversationStore.saveMessages(originalMessages, for: saveID)
+                            }
+                        }
                     }
                 }
 
@@ -1219,6 +1406,36 @@ final class CompanionManager: ObservableObject {
     }
 
     // MARK: - Test Helpers
+
+    /// Tests the Anthropic API key by sending a minimal request to Claude.
+    @Published private(set) var apiKeyTestStatus: String = ""
+
+    func testAnthropicAPIKey() {
+        guard isUsingDirectAPIKey else {
+            apiKeyTestStatus = "No API key set"
+            return
+        }
+        apiKeyTestStatus = "Testing..."
+        Task {
+            do {
+                let (responseText, _) = try await claudeAPI.analyzeImageStreaming(
+                    images: [],
+                    systemPrompt: "Respond with exactly: OK",
+                    conversationHistory: [],
+                    userPrompt: "ping",
+                    onTextChunk: { _ in }
+                )
+                if !responseText.isEmpty {
+                    apiKeyTestStatus = "✅ API key working"
+                } else {
+                    apiKeyTestStatus = "⚠️ Empty response"
+                }
+            } catch {
+                apiKeyTestStatus = "❌ \(error.localizedDescription)"
+                print("🔑 API key test error: \(error)")
+            }
+        }
+    }
 
     /// Speaks a sample phrase using the currently selected TTS provider.
     /// Used by the panel's test button to verify TTS without push-to-talk.

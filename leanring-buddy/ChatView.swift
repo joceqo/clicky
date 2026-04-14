@@ -19,8 +19,6 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            chatHeaderBar
-            dividerLine
             if companionManager.chatMessages.isEmpty {
                 emptyStateView
             } else {
@@ -30,38 +28,6 @@ struct ChatView: View {
             inputBarView
         }
         .background(DS.Colors.background)
-    }
-
-    // MARK: - Header
-
-    private var chatHeaderBar: some View {
-        HStack(spacing: 8) {
-            Text("Clicky")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(DS.Colors.textPrimary)
-
-            Spacer()
-
-            // Show the active model so the user knows which Claude they're talking to
-            Text(modelDisplayName)
-                .font(.system(size: 11))
-                .foregroundColor(DS.Colors.textTertiary)
-        }
-        .padding(.horizontal, 16)
-        // Extra top padding to clear the traffic-light buttons in the transparent title bar
-        .padding(.top, 16)
-        .padding(.bottom, 10)
-        .background(DS.Colors.surface1)
-    }
-
-    private var modelDisplayName: String {
-        switch companionManager.selectedModel {
-        case "claude-opus-4-6":   return "Opus 4.6"
-        case "claude-sonnet-4-6": return "Sonnet 4.6"
-        case "local":             return "Apple Intelligence"
-        case "lmstudio":          return "LM Studio"
-        default:                  return companionManager.selectedModel
-        }
     }
 
     // MARK: - Empty State
@@ -93,7 +59,7 @@ struct ChatView: View {
                     ForEach(companionManager.chatMessages) { message in
                         ChatMessageBubbleView(
                             message: message,
-                            chatHistoryStore: companionManager.chatHistoryStore
+                            conversationStore: companionManager.conversationStore
                         )
                     }
 
@@ -221,7 +187,7 @@ private struct SendButtonView: View {
 /// user can see exactly what Clicky was looking at when it answered.
 private struct ChatMessageBubbleView: View {
     let message: ChatMessage
-    let chatHistoryStore: ChatHistoryStore
+    let conversationStore: ConversationStore
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 6) {
@@ -266,7 +232,7 @@ private struct ChatMessageBubbleView: View {
         HStack(spacing: 6) {
             ForEach(message.screenshotFileNames, id: \.self) { fileName in
                 ScreenshotThumbnailView(
-                    fileURL: chatHistoryStore.screenshotFileURL(fileName: fileName)
+                    fileURL: conversationStore.screenshotFileURL(fileName: fileName)
                 )
             }
         }
@@ -315,15 +281,32 @@ private struct ChatMessageBubbleView: View {
         )
     }
 
-    // MARK: Timestamp + source badge
+    // MARK: Timestamp + source badge + model info
 
     private func bottomMetaRow(role: ChatMessageRole) -> some View {
         HStack(spacing: 4) {
             if role == .user && message.source == .voice {
-                // Mic badge signals this message came from push-to-talk, not typing
                 Image(systemName: "mic.fill")
                     .font(.system(size: 9))
                     .foregroundColor(DS.Colors.textTertiary)
+            }
+
+            // OCR badge for user messages that included screen text extraction
+            if role == .user && message.ocrText != nil {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 9))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+
+            // Screenshot count for user messages with captures
+            if role == .user && !message.screenshotFileNames.isEmpty {
+                HStack(spacing: 2) {
+                    Image(systemName: "camera.fill")
+                        .font(.system(size: 8))
+                    Text("\(message.screenshotFileNames.count)")
+                        .font(.system(size: 9))
+                }
+                .foregroundColor(DS.Colors.textTertiary)
             }
 
             Text(formattedTimestamp)
@@ -335,6 +318,53 @@ private struct ChatMessageBubbleView: View {
                     .font(.system(size: 9))
                     .foregroundColor(DS.Colors.textTertiary)
             }
+
+            // Model badge for assistant messages
+            if role == .assistant, let modelID = message.modelID {
+                HStack(spacing: 3) {
+                    modelBadgeIcon(modelID)
+                    Text(shortModelName(modelID))
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule()
+                        .fill(Color.white.opacity(0.06))
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func modelBadgeIcon(_ modelID: String) -> some View {
+        let size: CGFloat = 10
+        switch modelID {
+        case "claude-opus-4-6", "claude-sonnet-4-6":
+            Image("icon-anthropic").resizable().scaledToFit().frame(width: size, height: size)
+        case "lmstudio":
+            Image("icon-lmstudio").resizable().scaledToFit().frame(width: size, height: size)
+        case "local":
+            Image(systemName: "apple.logo").font(.system(size: 8))
+                .foregroundColor(DS.Colors.textTertiary)
+        default:
+            if modelID.lowercased().contains("gemma") {
+                Image("icon-gemma").resizable().scaledToFit().frame(width: size, height: size)
+            } else if !modelID.starts(with: "claude-") {
+                // Non-Claude models are likely from LM Studio
+                Image("icon-lmstudio").resizable().scaledToFit().frame(width: size, height: size)
+            }
+        }
+    }
+
+    private func shortModelName(_ modelID: String) -> String {
+        switch modelID {
+        case "claude-opus-4-6":   return "Opus"
+        case "claude-sonnet-4-6": return "Sonnet"
+        case "local":             return "Local"
+        case "lmstudio":         return "LM Studio"
+        default:                  return modelID
         }
     }
 

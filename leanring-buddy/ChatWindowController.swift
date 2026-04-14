@@ -37,21 +37,20 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
     }
 
     private func createAndShowChatWindow() {
-        let chatView = ChatView(companionManager: companionManager)
-        let hostingController = NSHostingController(rootView: chatView)
+        let chatContainerView = ChatContainerView(companionManager: companionManager)
+        let hostingController = NSHostingController(rootView: chatContainerView)
 
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Clicky"
-        window.setContentSize(NSSize(width: 660, height: 540))
-        window.minSize = NSSize(width: 440, height: 400)
+        window.setContentSize(NSSize(width: 880, height: 540))
+        window.minSize = NSSize(width: 660, height: 400)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         // Keep the window alive after closing so the conversation persists and
         // reopening is instant. The user must Quit the app to fully discard the window.
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        // Match the app's dark background so the title bar blends with the content header
+        // Match the app's dark background so the title bar blends with the toolbar
         window.backgroundColor = NSColor(red: 0x17 / 255.0, green: 0x19 / 255.0, blue: 0x18 / 255.0, alpha: 1)
         window.appearance = NSAppearance(named: .darkAqua)
         window.center()

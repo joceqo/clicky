@@ -7,7 +7,7 @@
 //  so the chat window displays the full conversation history regardless of
 //  how the user interacted with Clicky.
 //
-//  Codable so ChatHistoryStore can persist the message list to JSON.
+//  Codable so ConversationStore can persist the message list to JSON.
 //
 
 import Foundation
@@ -41,6 +41,10 @@ struct ChatMessage: Identifiable, Codable {
     var content: String
     let timestamp: Date
     let source: ChatMessageSource
+    /// The model that generated this response (e.g. "claude-sonnet-4-6", "lmstudio").
+    /// `nil` for user messages. Stored so the chat UI can show which model answered
+    /// and the conversation JSON serves as a complete debug log.
+    let modelID: String?
     /// Screen text extracted via OCR/Accessibility at the time of the voice query.
     /// `nil` for text-chat messages and for Claude-mode voice messages where OCR
     /// is not run (Claude sees the actual screenshot instead).
@@ -55,6 +59,7 @@ struct ChatMessage: Identifiable, Codable {
         role: ChatMessageRole,
         content: String,
         source: ChatMessageSource,
+        modelID: String? = nil,
         ocrText: String? = nil,
         screenshotFileNames: [String] = []
     ) {
@@ -63,6 +68,7 @@ struct ChatMessage: Identifiable, Codable {
         self.content = content
         self.timestamp = Date()
         self.source = source
+        self.modelID = modelID
         self.ocrText = ocrText
         self.screenshotFileNames = screenshotFileNames
     }
@@ -75,6 +81,7 @@ struct ChatMessage: Identifiable, Codable {
         role: ChatMessageRole,
         content: String,
         source: ChatMessageSource,
+        modelID: String? = nil,
         ocrText: String? = nil,
         screenshotFileNames: [String] = []
     ) {
@@ -83,6 +90,7 @@ struct ChatMessage: Identifiable, Codable {
         self.content = content
         self.timestamp = Date()
         self.source = source
+        self.modelID = modelID
         self.ocrText = ocrText
         self.screenshotFileNames = screenshotFileNames
     }
