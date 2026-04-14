@@ -53,6 +53,11 @@ struct ChatMessage: Identifiable, Codable {
     /// Empty for text-chat messages and populated asynchronously for voice messages.
     /// Files live in `~/Library/Application Support/Clicky/screenshots/`.
     var screenshotFileNames: [String]
+    /// Bundle identifier of the frontmost app when the screenshot was taken.
+    /// Used to display the app icon alongside screenshot thumbnails in the chat.
+    let foregroundAppBundleID: String?
+    /// Display name of the frontmost app when the screenshot was taken.
+    let foregroundAppName: String?
 
     /// Standard init — generates a new UUID automatically.
     init(
@@ -61,7 +66,9 @@ struct ChatMessage: Identifiable, Codable {
         source: ChatMessageSource,
         modelID: String? = nil,
         ocrText: String? = nil,
-        screenshotFileNames: [String] = []
+        screenshotFileNames: [String] = [],
+        foregroundAppBundleID: String? = nil,
+        foregroundAppName: String? = nil
     ) {
         self.id = UUID()
         self.role = role
@@ -71,6 +78,8 @@ struct ChatMessage: Identifiable, Codable {
         self.modelID = modelID
         self.ocrText = ocrText
         self.screenshotFileNames = screenshotFileNames
+        self.foregroundAppBundleID = foregroundAppBundleID
+        self.foregroundAppName = foregroundAppName
     }
 
     /// Init with an explicit UUID — used when the ID must be known before
@@ -83,7 +92,9 @@ struct ChatMessage: Identifiable, Codable {
         source: ChatMessageSource,
         modelID: String? = nil,
         ocrText: String? = nil,
-        screenshotFileNames: [String] = []
+        screenshotFileNames: [String] = [],
+        foregroundAppBundleID: String? = nil,
+        foregroundAppName: String? = nil
     ) {
         self.id = id
         self.role = role
@@ -93,5 +104,7 @@ struct ChatMessage: Identifiable, Codable {
         self.modelID = modelID
         self.ocrText = ocrText
         self.screenshotFileNames = screenshotFileNames
+        self.foregroundAppBundleID = foregroundAppBundleID
+        self.foregroundAppName = foregroundAppName
     }
 }

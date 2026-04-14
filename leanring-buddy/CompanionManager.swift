@@ -1266,13 +1266,20 @@ final class CompanionManager: ObservableObject {
                 // window updates without waiting for screenshot compression to finish.
                 // The user message gets a pre-assigned UUID so screenshot files can be
                 // named after it even though they're saved asynchronously.
+                // Capture which app the user was looking at when they spoke
+                let frontmostApp = NSWorkspace.shared.frontmostApplication
+                let foregroundAppBundleID = frontmostApp?.bundleIdentifier
+                let foregroundAppName = frontmostApp?.localizedName
+
                 let voiceUserMessageID = UUID()
                 chatMessages.append(ChatMessage(
                     id: voiceUserMessageID,
                     role: .user,
                     content: transcript,
                     source: .voice,
-                    ocrText: extractedScreenText
+                    ocrText: extractedScreenText,
+                    foregroundAppBundleID: foregroundAppBundleID,
+                    foregroundAppName: foregroundAppName
                 ))
                 chatMessages.append(ChatMessage(role: .assistant, content: spokenText, source: .voice, modelID: resolvedModelIDForMessages))
 

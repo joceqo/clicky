@@ -227,18 +227,26 @@ private struct ChatMessageBubbleView: View {
 
     // MARK: Screenshot thumbnails
 
-    /// A horizontal strip of small screenshot previews shown above the user's
-    /// voice message text bubble. Each thumbnail is 96 px tall with rounded corners.
+    /// A horizontal scrollable strip of screenshot previews shown above the user's
+    /// voice message text bubble. Each thumbnail is up to 160 px tall with rounded
+    /// corners. Scrollable so multi-monitor captures don't overflow the bubble.
     private var screenshotThumbnailStrip: some View {
-        HStack(spacing: 6) {
-            ForEach(message.screenshotFileNames, id: \.self) { fileName in
-                let screenshotFileURL = conversationStore.screenshotFileURL(fileName: fileName)
-                ScreenshotThumbnailView(
-                    fileURL: screenshotFileURL,
-                    onTapThumbnail: {
-                        selectedScreenshotFileURL = screenshotFileURL
-                    }
-                )
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack(spacing: 8) {
+                ForEach(message.screenshotFileNames, id: \.self) { fileName in
+                    let screenshotFileURL = conversationStore.screenshotFileURL(fileName: fileName)
+                    ScreenshotThumbnailView(
+                        fileURL: screenshotFileURL,
+                        onTapThumbnail: {
+                            selectedScreenshotFileURL = screenshotFileURL
+                        }
+                    )
+                }
+            }
+
+            // App icon + name caption below the thumbnails
+            if let appName = message.foregroundAppName {
+                screenshotAppCaption(appName: appName, bundleID: message.foregroundAppBundleID)
             }
         }
         .sheet(isPresented: isScreenshotDetailPresentedBinding) {
@@ -257,6 +265,23 @@ private struct ChatMessageBubbleView: View {
                 }
             }
         )
+    }
+
+    /// Small caption showing the frontmost app icon and name below screenshot thumbnails.
+    private func screenshotAppCaption(appName: String, bundleID: String?) -> some View {
+        HStack(spacing: 4) {
+            if let bundleID,
+               let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: appURL.path))
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 12, height: 12)
+            }
+            Text(appName)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(DS.Colors.textTertiary)
+                .lineLimit(1)
+        }
     }
 
     // MARK: Assistant bubble
@@ -407,55 +432,77 @@ private struct ScreenshotThumbnailView: View {
 
     @State private var thumbnailImage: NSImage? = nil
     @State private var isHoveringThumbnail = false
+    @State private var ocrCaption: String? = nil
 
-    private let thumbnailHeight: CGFloat = 90
+    private let thumbnailMaxHeight: CGFloat = 160
+    private let thumbnailMaxWidth: CGFloat = 320
 
     var body: some View {
-        Button(action: onTapThumbnail) {
-            Group {
-                if let image = thumbnailImage {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(height: thumbnailHeight)
-                        .clipped()
-                        .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
-                } else {
-                    // Placeholder shown while the image loads or if the file is missing
+        VStack(alignment: .trailing, spacing: 3) {
+            Button(action: onTapThumbnail) {
+                Group {
+                    if let image = thumbnailImage {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: thumbnailMaxWidth, maxHeight: thumbnailMaxHeight)
+                            .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
+                    } else {
+                        // Placeholder shown while the image loads or if the file is missing
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
+                            .fill(DS.Colors.surface3)
+                            .frame(width: 120, height: thumbnailMaxHeight)
+                            .overlay(
+                                Image(systemName: "photo")
+                                    .foregroundColor(DS.Colors.textTertiary)
+                            )
+                    }
+                }
+                .background(DS.Colors.surface1)
+                .clipShape(RoundedRectangle(cornerRadius: DS.CornerRadius.medium))
+                .overlay(
                     RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
-                        .fill(DS.Colors.surface3)
-                        .frame(height: thumbnailHeight)
-                        .overlay(
-                            Image(systemName: "photo")
-                                .foregroundColor(DS.Colors.textTertiary)
+                        .stroke(
+                            isHoveringThumbnail ? DS.Colors.blue500.opacity(0.6) : DS.Colors.borderSubtle,
+                            lineWidth: 1
                         )
+                )
+                .shadow(color: Color.black.opacity(0.15), radius: 3, x: 0, y: 1)
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering in
+                isHoveringThumbnail = hovering
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
                 }
             }
-        }
-        .buttonStyle(.plain)
-        .overlay(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
-                .stroke(DS.Colors.borderSubtle.opacity(isHoveringThumbnail ? 1 : 0), lineWidth: 1)
-        )
-        .onHover { hovering in
-            isHoveringThumbnail = hovering
-            if hovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
+
+            // OCR-extracted caption from the top of the screenshot (window title area)
+            if let caption = ocrCaption {
+                Text(caption)
+                    .font(.system(size: 9))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: thumbnailMaxWidth, alignment: .trailing)
             }
         }
-        .onAppear { loadThumbnail() }
+        .onAppear { loadThumbnailAndCaption() }
         // Reload if screenshotFileNames was updated after async compression finished
-        .onChange(of: fileURL) { _ in loadThumbnail() }
+        .onChange(of: fileURL) { _ in loadThumbnailAndCaption() }
     }
 
-    private func loadThumbnail() {
-        // Load from disk on a background thread so the main thread stays responsive
+    private func loadThumbnailAndCaption() {
         let url = fileURL
         Task.detached(priority: .utility) {
-            let image = NSImage(contentsOf: url)
+            guard let image = NSImage(contentsOf: url) else { return }
             await MainActor.run { thumbnailImage = image }
+
+            // Run OCR on the top ~15% of the image to extract the window title bar text
+            let caption = ScreenshotCaptionExtractor.extractCaption(from: image)
+            await MainActor.run { ocrCaption = caption }
         }
     }
 }
