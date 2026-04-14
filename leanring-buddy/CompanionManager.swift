@@ -678,6 +678,7 @@ final class CompanionManager: ObservableObject {
 
             do {
                 let fullResponseText: String
+                var screenCaptures: [CompanionScreenCapture] = []
 
                 if isLocalModel {
                     // Local mode (Apple Intelligence): text-only, no screenshots, no pointing.
@@ -702,7 +703,7 @@ final class CompanionManager: ObservableObject {
                     fullResponseText = responseText + " [POINT:none]"
                 } else {
                     // Cloud mode (Claude): full vision pipeline with screenshots and pointing
-                    let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
 
                     guard !Task.isCancelled else { return }
 
@@ -748,6 +749,7 @@ final class CompanionManager: ObservableObject {
 
                 // Pick the screen capture matching Claude's screen number,
                 // falling back to the cursor screen if not specified.
+                // In local mode screenCaptures is empty so this returns nil.
                 let targetScreenCapture: CompanionScreenCapture? = {
                     if let screenNumber = parseResult.screenNumber,
                        screenNumber >= 1 && screenNumber <= screenCaptures.count {
