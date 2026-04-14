@@ -59,16 +59,16 @@ struct ChatContainerView: View {
                 .help("New Chat")
             }
 
-            ToolbarItem(placement: .status) {
-                HStack(spacing: 4) {
-                    modelIconView
-                    Text(modelDisplayName)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    if let activeID = companionManager.activeConversationID {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(activeID.uuidString, forType: .string)
+                    }
+                } label: {
+                    Image(systemName: "doc.on.doc")
                 }
-                .help("⌃M to switch model")
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .help("Copy Chat ID")
             }
 
             ToolbarItem(placement: .primaryAction) {
@@ -90,28 +90,5 @@ struct ChatContainerView: View {
         return conversation.title
     }
 
-    @ViewBuilder
-    private var modelIconView: some View {
-        switch companionManager.selectedModel {
-        case "claude-opus-4-6", "claude-sonnet-4-6":
-            Image("icon-anthropic").resizable().scaledToFit().frame(width: 14, height: 14)
-        case "lmstudio":
-            Image("icon-lmstudio").resizable().scaledToFit().frame(width: 14, height: 14)
-        case "local":
-            Image(systemName: "apple.logo").font(.system(size: 12))
-        default:
-            EmptyView()
-        }
-    }
-
-    private var modelDisplayName: String {
-        switch companionManager.selectedModel {
-        case "claude-opus-4-6":   return "Opus 4.6"
-        case "claude-sonnet-4-6": return "Sonnet 4.6"
-        case "local":             return "Apple Intelligence"
-        case "lmstudio":          return "LM Studio"
-        default:                  return companionManager.selectedModel
-        }
-    }
 
 }

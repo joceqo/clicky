@@ -1235,7 +1235,8 @@ final class CompanionManager: ObservableObject {
                     // LM Studio mode: local vision model via OpenAI-compatible API.
                     // Sends screenshots for visual context AND prepends OCR-extracted text
                     // so weak vision models can still read the screen reliably.
-                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                    // Smaller screenshots (768px) for faster local inference.
+                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG(maxDimension: 768)
 
                     guard !Task.isCancelled else { return }
 
