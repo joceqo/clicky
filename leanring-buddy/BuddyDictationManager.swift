@@ -560,10 +560,15 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         print("🎙️ BuddyDictationManager: provider ready, starting audio engine")
 
         let inputNode = audioEngine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
 
         inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+        // Pass nil for the format so AVAudioEngine delivers buffers in the
+        // input node's native hardware format. Explicitly requesting a format
+        // can fail with a format mismatch (-10877) when the hardware sample rate
+        // (e.g. 96kHz) differs from a stale cached format after an aggregate
+        // device rebuild. Downstream converters (BuddyPCM16AudioConverter)
+        // already resample to the target rate, so the tap format doesn't matter.
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             self?.activeTranscriptionSession?.appendAudioBuffer(buffer)
             self?.updateAudioPowerLevel(from: buffer)
         }

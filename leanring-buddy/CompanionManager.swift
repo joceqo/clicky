@@ -177,6 +177,14 @@ final class CompanionManager: ObservableObject {
                 if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let dataArray = json["data"] as? [[String: Any]] {
                     var models = dataArray.compactMap { $0["id"] as? String }
+                        .filter { modelID in
+                            // Filter out SHA hashes (unloaded models) and speech tokenizer sub-models.
+                            // Readable model IDs contain a "/" (e.g. "google/gemma-4-e4b") or
+                            // a hyphen-separated name (e.g. "text-embedding-nomic-embed-text-v1.5").
+                            let looksLikeHash = modelID.range(of: "^[0-9a-f]{20,}$", options: .regularExpression) != nil
+                            let isSpeechTokenizer = modelID.contains("/speech_tokenizer")
+                            return !looksLikeHash && !isSpeechTokenizer
+                        }
                     models.sort()
                     self.availableLMStudioModels = models
                     // Auto-select first model if none selected yet
@@ -698,6 +706,7 @@ final class CompanionManager: ObservableObject {
     you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
+    - always respond in the same language the user spoke in. if they speak french, reply in french. if they speak english, reply in english. match their language exactly.
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
     - all lowercase, casual, warm. no emojis.
     - write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
@@ -787,6 +796,7 @@ final class CompanionManager: ObservableObject {
                         (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                     }
 
+                    let lmStudioStartTime = Date()
                     let (responseText, _) = try await lmStudioAPI.analyzeImageStreaming(
                         images: labeledImages,
                         systemPrompt: Self.companionVoiceResponseSystemPrompt,
@@ -796,6 +806,9 @@ final class CompanionManager: ObservableObject {
                             // No streaming text display — spinner stays until TTS plays
                         }
                     )
+                    let lmStudioElapsed = Date().timeIntervalSince(lmStudioStartTime)
+                    print("⏱️ LM Studio response: \(String(format: "%.1f", lmStudioElapsed))s")
+                    print("💬 LM Studio text: \(responseText)")
                     fullResponseText = responseText
                 } else {
                     // Cloud mode (Claude): full vision pipeline with screenshots and pointing
