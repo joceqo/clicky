@@ -1017,6 +1017,32 @@ struct ChatSettingsView: View {
                         set: { companionManager.setRemindActionEnabled($0) }
                     )
                 )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Control music",
+                    hint: "Execute [MUSIC:] tags — works with Spotify, Apple Music, YouTube, etc.",
+                    isOn: Binding(
+                        get: { companionManager.isMusicActionEnabled },
+                        set: { companionManager.setMusicActionEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Click UI elements",
+                    hint: "Execute [CLICK:] tags — simulates mouse clicks at screen coordinates (voice only)",
+                    isOn: Binding(
+                        get: { companionManager.isClickActionEnabled },
+                        set: { companionManager.setClickActionEnabled($0) }
+                    )
+                )
             }
         }
     }

@@ -248,6 +248,24 @@ final class CompanionManager: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "isRemindActionEnabled")
     }
 
+    /// Whether Claude can control music playback via [MUSIC:] tags.
+    /// Uses media key simulation — works with Spotify, Apple Music, YouTube, etc.
+    @Published var isMusicActionEnabled: Bool = UserDefaults.standard.object(forKey: "isMusicActionEnabled") as? Bool ?? true
+
+    func setMusicActionEnabled(_ enabled: Bool) {
+        isMusicActionEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isMusicActionEnabled")
+    }
+
+    /// Whether Claude can simulate left-clicks at screen coordinates via [CLICK:] tags.
+    /// Requires the accessibility permission already granted for push-to-talk.
+    @Published var isClickActionEnabled: Bool = UserDefaults.standard.object(forKey: "isClickActionEnabled") as? Bool ?? true
+
+    func setClickActionEnabled(_ enabled: Bool) {
+        isClickActionEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isClickActionEnabled")
+    }
+
     // MARK: - Daily review notification settings
 
     /// Whether the daily learning review notification is enabled.
@@ -538,8 +556,8 @@ final class CompanionManager: ObservableObject {
         updatedProfile.save()
     }
 
-    /// Prepends the user profile block and current app context to a base system
-    /// prompt. Profile is omitted when empty. App context is omitted when unknown.
+    /// Prepends the user profile block and current context (active app, now playing)
+    /// to a base system prompt. Each piece is omitted when not available.
     private func buildSystemPromptWithContext(_ baseSystemPrompt: String) -> String {
         var prefixParts: [String] = []
 
@@ -552,6 +570,12 @@ final class CompanionManager: ObservableObject {
         // the user having to mention the app in every message.
         if let appName = lastKnownFrontmostNonClickyAppName {
             prefixParts.append("current app: \(appName)")
+        }
+
+        // Inject the currently playing track so Claude can answer "what's this song?"
+        // or act on "skip this" / "pause" without needing a screenshot.
+        if let nowPlaying = MusicController.currentlyPlayingDescription() {
+            prefixParts.append("currently playing: \(nowPlaying)")
         }
 
         guard !prefixParts.isEmpty else { return baseSystemPrompt }
@@ -1230,6 +1254,22 @@ final class CompanionManager: ObservableObject {
     creating reminders:
     when the user asks to be reminded of something, append: [REMIND:reminder text:when (e.g. tomorrow 9am)]
 
+    music control:
+    when the user asks to play, pause, skip, go back, or control music, append: [MUSIC:action]
+    valid actions: play, pause, toggle, next, prev
+    examples: [MUSIC:next] or [MUSIC:pause]
+    works system-wide — whichever app is currently playing (Spotify, Apple Music, YouTube, etc.) will respond.
+    the "currently playing" context above tells you what's active so you can confirm it in your reply.
+
+    clicking ui elements:
+    when the user asks you to click something on screen, or when clicking would complete their request (e.g. "render this", "save the file", "click that button"), append: [CLICK:x,y:label]
+    coordinates are in the same screenshot pixel space as [POINT:] — top-left origin, same image dimensions.
+    if the element is on a different screen, append :screenN (e.g. [CLICK:400,200:render button:screen2]).
+    the cursor will fly to the target for visual confirmation, then the click fires.
+    only use [CLICK:] when you're confident about the element's location from the screenshot. never guess.
+    you can combine [CLICK:] and [POINT:] in the same response — [CLICK:] for the element to interact with, [POINT:] for a different element to highlight.
+    example: "i'll hit render for you — [CLICK:1200,680:start render]"
+
     all action tags are stripped from what gets spoken — never mention them in your spoken response.
     """
 
@@ -1282,6 +1322,11 @@ final class CompanionManager: ObservableObject {
 
     creating reminders:
     when the user asks to be reminded of something, append: [REMIND:reminder text:when]
+
+    music control:
+    when the user asks to play, pause, skip, or control music, append: [MUSIC:action]
+    valid actions: play, pause, toggle, next, prev
+    the "currently playing" context above tells you what's active so you can reference it.
 
     all action tags are stripped automatically — never mention them in your response text.
     """
@@ -1574,7 +1619,8 @@ final class CompanionManager: ObservableObject {
                 }
 
                 let voiceActionResult = ActionTagParser.parse(from: voiceNoteResult.textWithNotesStripped)
-                executeActionTags(voiceActionResult, noteTitle: voiceNoteResult.notes.first?.title)
+                // Pass screen captures so [CLICK:] tags can be mapped to screen coordinates
+                executeActionTags(voiceActionResult, noteTitle: voiceNoteResult.notes.first?.title, screenCaptures: screenCaptures)
 
                 // Parse the [POINT:...] tag from the fully action-stripped response
                 let parseResult = Self.parsePointingCoordinates(from: voiceActionResult.cleanedText)
@@ -2033,10 +2079,17 @@ final class CompanionManager: ObservableObject {
     // MARK: - Action Tag Execution
 
     /// Executes all actions extracted by ActionTagParser: learning log entries,
-    /// open targets, shortcut runs, and reminders. `noteTitle` is the title of
-    /// any Apple Note created in the same response (used to link LOG entries).
-    /// All actions run in the background and never block the main actor.
-    func executeActionTags(_ actions: ParsedActionTags, noteTitle: String?) {
+    /// open targets, shortcut runs, reminders, music control, and screen clicks.
+    /// `noteTitle` is the title of any Apple Note created in the same response
+    /// (used to link LOG entries). `screenCaptures` is passed in from the voice
+    /// pipeline so [CLICK:] tags can be mapped from screenshot pixels to screen
+    /// coordinates — pass an empty array from the chat pipeline (no screenshots).
+    /// All actions run on the main actor or background queues and never block TTS.
+    func executeActionTags(
+        _ actions: ParsedActionTags,
+        noteTitle: String?,
+        screenCaptures: [CompanionScreenCapture] = []
+    ) {
         // Learning log entries — only written when the toggle is on
         if isLearningLogEnabled {
             for logEntry in actions.logEntries {
@@ -2071,6 +2124,96 @@ final class CompanionManager: ObservableObject {
                 }
             }
         }
+
+        // Music control via media key simulation — only when the toggle is on
+        if isMusicActionEnabled {
+            for musicAction in actions.musicActions {
+                MusicController.handleMusicAction(musicAction)
+            }
+        }
+
+        // Left-click simulation — only when the toggle is on and screen captures are available
+        // (screen captures are only present in the voice pipeline, not the chat pipeline)
+        if isClickActionEnabled, !screenCaptures.isEmpty {
+            for clickTarget in actions.clickTargets {
+                simulateClick(clickTarget: clickTarget, usingScreenCaptures: screenCaptures)
+            }
+        }
+    }
+
+    /// Maps a [CLICK:] tag's screenshot-pixel coordinate to a global AppKit screen
+    /// coordinate and fires a CGEvent left-click at that position.
+    ///
+    /// The coordinate mapping is identical to the [POINT:] system: screenshot pixels
+    /// scale to display points, then flip from top-left to bottom-left AppKit origin.
+    /// This ensures the click lands on the correct pixel regardless of display scaling.
+    private func simulateClick(clickTarget: ParsedClickTarget, usingScreenCaptures screenCaptures: [CompanionScreenCapture]) {
+        // Pick the right screen — prefer the screen number Claude specified,
+        // fall back to the screen where the cursor currently sits.
+        let targetCapture: CompanionScreenCapture? = {
+            if let screenNumber = clickTarget.screenNumber,
+               screenNumber >= 1, screenNumber <= screenCaptures.count {
+                return screenCaptures[screenNumber - 1]
+            }
+            return screenCaptures.first(where: { $0.isCursorScreen })
+        }()
+
+        guard let targetCapture else {
+            print("⚠️ [CLICK] no matching screen capture for target '\(clickTarget.label ?? "unknown")'")
+            return
+        }
+
+        let screenshotWidth  = CGFloat(targetCapture.screenshotWidthInPixels)
+        let screenshotHeight = CGFloat(targetCapture.screenshotHeightInPixels)
+        let displayWidth     = CGFloat(targetCapture.displayWidthInPoints)
+        let displayHeight    = CGFloat(targetCapture.displayHeightInPoints)
+        let displayFrame     = targetCapture.displayFrame
+
+        // Clamp to valid screenshot bounds before scaling
+        let clampedX = max(0, min(clickTarget.pixelCoordinate.x, screenshotWidth))
+        let clampedY = max(0, min(clickTarget.pixelCoordinate.y, screenshotHeight))
+
+        // Scale from screenshot pixels → display points
+        let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+        let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+
+        // Convert from top-left origin (screenshot) → bottom-left origin (AppKit)
+        let appKitY = displayHeight - displayLocalY
+
+        // Convert display-local → global AppKit coordinates
+        let globalAppKitPoint = CGPoint(
+            x: displayLocalX + displayFrame.origin.x,
+            y: appKitY + displayFrame.origin.y
+        )
+
+        // CoreGraphics uses top-left origin for the full virtual screen space.
+        // The total virtual height is the union of all screen frames' maxY.
+        let totalVirtualScreenHeight = NSScreen.screens.map { $0.frame.maxY }.max() ?? displayHeight
+        let cgClickPoint = CGPoint(
+            x: globalAppKitPoint.x,
+            y: totalVirtualScreenHeight - globalAppKitPoint.y
+        )
+
+        // Fire the left click via CGEvent — the OS delivers it to whichever
+        // window is at that screen coordinate, just like a real mouse click.
+        guard let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
+                                      mouseCursorPosition: cgClickPoint, mouseButton: .left),
+              let mouseUp   = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
+                                      mouseCursorPosition: cgClickPoint, mouseButton: .left) else {
+            print("⚠️ [CLICK] failed to create CGEvent for '\(clickTarget.label ?? "unknown")'")
+            return
+        }
+
+        mouseDown.post(tap: .cgHidEventTap)
+        mouseUp.post(tap: .cgHidEventTap)
+
+        // Move the cursor overlay to the click target for visual confirmation,
+        // exactly like [POINT:] does. This shows the user where Clicky clicked.
+        detectedElementScreenLocation = globalAppKitPoint
+        detectedElementDisplayFrame   = displayFrame
+        detectedElementBubbleText     = clickTarget.label.map { "clicking \($0)" }
+
+        print("🖱️ [CLICK] '\(clickTarget.label ?? "element")' at screenshot (\(Int(clickTarget.pixelCoordinate.x)), \(Int(clickTarget.pixelCoordinate.y))) → screen (\(Int(cgClickPoint.x)), \(Int(cgClickPoint.y)))")
     }
 
     // MARK: - Point Tag Parsing
