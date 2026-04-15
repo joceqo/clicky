@@ -180,6 +180,41 @@ final class CompanionManager: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "isOCRExtractionEnabled")
     }
 
+    // MARK: - Action tag toggles
+
+    /// Whether Claude can silently log topics to the learning store via [LOG:] tags.
+    /// Toggling off stops new entries from being written; existing entries are untouched.
+    @Published var isLearningLogEnabled: Bool = UserDefaults.standard.object(forKey: "isLearningLogEnabled") as? Bool ?? true
+
+    func setLearningLogEnabled(_ enabled: Bool) {
+        isLearningLogEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isLearningLogEnabled")
+    }
+
+    /// Whether Claude can open URLs and launch apps via [OPEN:] tags.
+    @Published var isOpenActionEnabled: Bool = UserDefaults.standard.object(forKey: "isOpenActionEnabled") as? Bool ?? true
+
+    func setOpenActionEnabled(_ enabled: Bool) {
+        isOpenActionEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isOpenActionEnabled")
+    }
+
+    /// Whether Claude can run Apple Shortcuts by name via [SHORTCUT:] tags.
+    @Published var isShortcutActionEnabled: Bool = UserDefaults.standard.object(forKey: "isShortcutActionEnabled") as? Bool ?? true
+
+    func setShortcutActionEnabled(_ enabled: Bool) {
+        isShortcutActionEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isShortcutActionEnabled")
+    }
+
+    /// Whether Claude can create macOS reminders via [REMIND:] tags.
+    @Published var isRemindActionEnabled: Bool = UserDefaults.standard.object(forKey: "isRemindActionEnabled") as? Bool ?? true
+
+    func setRemindActionEnabled(_ enabled: Bool) {
+        isRemindActionEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isRemindActionEnabled")
+    }
+
     /// Queries LM Studio's local /v1/models endpoint and populates the model dropdown.
     func fetchAvailableLMStudioModels() {
         guard let url = URL(string: "http://127.0.0.1:1234/v1/models") else { return }
@@ -1865,29 +1900,37 @@ final class CompanionManager: ObservableObject {
     /// any Apple Note created in the same response (used to link LOG entries).
     /// All actions run in the background and never block the main actor.
     func executeActionTags(_ actions: ParsedActionTags, noteTitle: String?) {
-        // Learning log entries — append silently, no user-visible feedback needed
-        for logEntry in actions.logEntries {
-            let entry = LearningEntry(
-                app: logEntry.app,
-                topic: logEntry.topic,
-                noteTitle: noteTitle
-            )
-            learningLogStore.append(entry)
+        // Learning log entries — only written when the toggle is on
+        if isLearningLogEnabled {
+            for logEntry in actions.logEntries {
+                let entry = LearningEntry(
+                    app: logEntry.app,
+                    topic: logEntry.topic,
+                    noteTitle: noteTitle
+                )
+                learningLogStore.append(entry)
+            }
         }
 
-        // Open URLs or apps via NSWorkspace
-        for target in actions.openTargets {
-            ActionExecutor.openURLOrApp(target)
+        // Open URLs or apps via NSWorkspace — only when the toggle is on
+        if isOpenActionEnabled {
+            for target in actions.openTargets {
+                ActionExecutor.openURLOrApp(target)
+            }
         }
 
-        // Apple Shortcuts — run by name via the `shortcuts` CLI
-        for shortcutName in actions.shortcutNames {
-            ActionExecutor.runShortcut(named: shortcutName)
+        // Apple Shortcuts — run by name via the `shortcuts` CLI, only when the toggle is on
+        if isShortcutActionEnabled {
+            for shortcutName in actions.shortcutNames {
+                ActionExecutor.runShortcut(named: shortcutName)
+            }
         }
 
-        // Reminders via Reminders app AppleScript
-        for reminder in actions.reminders {
-            ActionExecutor.createReminder(text: reminder.text, dateHint: reminder.dateHint)
+        // Reminders via Reminders app AppleScript — only when the toggle is on
+        if isRemindActionEnabled {
+            for reminder in actions.reminders {
+                ActionExecutor.createReminder(text: reminder.text, dateHint: reminder.dateHint)
+            }
         }
     }
 

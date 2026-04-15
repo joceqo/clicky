@@ -361,6 +361,7 @@ struct ChatSettingsView: View {
             modelSection
             voiceSection
             speechSection
+            actionsSection
         }
     }
 
@@ -842,6 +843,88 @@ struct ChatSettingsView: View {
                 .scaleEffect(0.8)
             }
         }
+    }
+
+    // MARK: - Actions
+
+    /// Toggles that control which action tags Claude is allowed to execute.
+    /// Each toggle maps directly to a flag in CompanionManager that gates the
+    /// corresponding executor — turning one off means the tag is still stripped
+    /// from the response text, but the action is never performed.
+    private var actionsSection: some View {
+        settingsSection(title: "Actions") {
+            VStack(spacing: 0) {
+                actionToggleRow(
+                    label: "Track learning topics",
+                    hint: "Log [LOG:] tags to the Learning tab",
+                    isOn: Binding(
+                        get: { companionManager.isLearningLogEnabled },
+                        set: { companionManager.setLearningLogEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Open URLs and apps",
+                    hint: "Execute [OPEN:] tags via NSWorkspace",
+                    isOn: Binding(
+                        get: { companionManager.isOpenActionEnabled },
+                        set: { companionManager.setOpenActionEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Run Apple Shortcuts",
+                    hint: "Execute [SHORTCUT:] tags via the shortcuts CLI",
+                    isOn: Binding(
+                        get: { companionManager.isShortcutActionEnabled },
+                        set: { companionManager.setShortcutActionEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Create reminders",
+                    hint: "Execute [REMIND:] tags via Reminders.app",
+                    isOn: Binding(
+                        get: { companionManager.isRemindActionEnabled },
+                        set: { companionManager.setRemindActionEnabled($0) }
+                    )
+                )
+            }
+        }
+    }
+
+    private func actionToggleRow(label: String, hint: String, isOn: Binding<Bool>) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Text(hint)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .tint(DS.Colors.accent)
+                .scaleEffect(0.8)
+        }
+        .padding(.vertical, 6)
     }
 
     // MARK: - Reusable Components
