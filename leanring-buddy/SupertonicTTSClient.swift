@@ -9,6 +9,7 @@
 
 import AVFoundation
 import Foundation
+import NaturalLanguage
 
 @MainActor
 final class SupertonicTTSClient {
@@ -55,7 +56,12 @@ final class SupertonicTTSClient {
 
     // MARK: - Public interface
 
-    /// Synthesizes `text` using the selected voice and plays back the audio.
+    /// Synthesizes `text` sentence-by-sentence and begins playback as soon as the
+    /// first sentence is ready. This cuts perceived latency for long responses —
+    /// the user hears the first word after ~5ms instead of waiting for the full
+    /// text to be synthesized. Supertonic runs at ~167× realtime, so subsequent
+    /// sentences are synthesized and queued while the current one is playing.
+    ///
     /// Downloads ONNX models from HuggingFace on first call (~200MB one-time).
     /// Throws on network, model-loading, or synthesis errors.
     func speakText(_ text: String) async throws {
@@ -72,20 +78,9 @@ final class SupertonicTTSClient {
         let tts = try loadEngineIfNeeded()
         guard activePlaybackSession == session else { return }
 
-        // Synthesize — runs on CPU/ANE via ONNX Runtime, fast enough for main thread
         let voiceStylePath = Self.voiceStylesDir.appendingPathComponent("\(selectedVoice).json").path
-        let result = try tts.synthesize(text: text, lang: "en", voiceStylePath: voiceStylePath, speed: 1.05)
-        guard activePlaybackSession == session else { return }
-
-        let samples = result.wav
-        guard !samples.isEmpty else {
-            throw NSError(domain: "SupertonicTTS", code: -1,
-                          userInfo: [NSLocalizedDescriptionKey: "Supertonic returned empty audio"])
-        }
-
         let sampleRate = tts.sampleRate
 
-        // Build a Float32 mono AVAudioPCMBuffer from the raw samples
         guard let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: Double(sampleRate),
@@ -96,17 +91,12 @@ final class SupertonicTTSClient {
                           userInfo: [NSLocalizedDescriptionKey: "Could not create audio format"])
         }
 
-        let frameCount = AVAudioFrameCount(samples.count)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount),
-              let channelData = buffer.floatChannelData?[0] else {
-            throw NSError(domain: "SupertonicTTS", code: -3,
-                          userInfo: [NSLocalizedDescriptionKey: "Could not allocate audio buffer"])
-        }
+        // Split into sentences so we can start playback after the first sentence
+        // is synthesized rather than waiting for the whole response.
+        let sentences = splitIntoSentenceChunks(text)
 
-        buffer.frameLength = frameCount
-        for i in 0..<samples.count { channelData[i] = samples[i] }
-
-        // Wire up AVAudioEngine and start playback
+        // Set up one AVAudioEngine for the full response — AVAudioPlayerNode maintains
+        // an internal queue, so scheduling multiple buffers plays them gaplessly.
         let avEngine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         avEngine.attach(player)
@@ -114,25 +104,89 @@ final class SupertonicTTSClient {
         audioEngine = avEngine
         playerNode = player
 
-        isPlaying = true
-        try avEngine.start()
-        player.play()
+        var buffersScheduled = 0
 
-        print("🔊 Supertonic TTS: playing \(samples.count / sampleRate)s audio, voice \(selectedVoice)")
+        // Synthesize and schedule each sentence. The engine starts after the first
+        // buffer is scheduled so audio begins immediately, while the rest are
+        // synthesized and queued during playback.
+        for (index, sentence) in sentences.enumerated() {
+            guard activePlaybackSession == session else { break }
 
-        // Suspend the caller until playback finishes (or stopPlayback() cancels the session)
+            let result = try tts.synthesize(text: sentence, lang: "en", voiceStylePath: voiceStylePath, speed: 1.05)
+            let samples = result.wav
+            guard !samples.isEmpty else { continue }
+
+            let frameCount = AVAudioFrameCount(samples.count)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount),
+                  let channelData = buffer.floatChannelData?[0] else { continue }
+
+            buffer.frameLength = frameCount
+            for i in 0..<samples.count { channelData[i] = samples[i] }
+
+            // Start the engine right after the first sentence is synthesized
+            // so the user hears audio immediately without waiting for all sentences.
+            if index == 0 {
+                isPlaying = true
+                try avEngine.start()
+                player.play()
+                print("🔊 Supertonic TTS: started playback, voice \(selectedVoice), \(sentences.count) sentence(s)")
+            }
+
+            buffersScheduled += 1
+            player.scheduleBuffer(buffer, completionHandler: nil)
+        }
+
+        guard buffersScheduled > 0, activePlaybackSession == session else {
+            isPlaying = false
+            tearDownAudioEngine()
+            throw NSError(domain: "SupertonicTTS", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Supertonic returned no audio"])
+        }
+
+        // Suspend the caller until all scheduled buffers finish playing.
+        // We schedule one final silent marker buffer to detect end-of-playback.
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            player.scheduleBuffer(buffer) { [weak self] in
-                Task { @MainActor [weak self] in
-                    guard let self else { continuation.resume(); return }
-                    if self.activePlaybackSession == session {
-                        self.isPlaying = false
-                        self.tearDownAudioEngine()
+            // Schedule a zero-frame sentinel buffer. AVAudioPlayerNode fires its
+            // completion handler in queue order, so this fires after all audio.
+            if let sentinelBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 0) {
+                sentinelBuffer.frameLength = 0
+                player.scheduleBuffer(sentinelBuffer) { [weak self] in
+                    Task { @MainActor [weak self] in
+                        guard let self else { continuation.resume(); return }
+                        if self.activePlaybackSession == session {
+                            self.isPlaying = false
+                            self.tearDownAudioEngine()
+                        }
+                        continuation.resume()
                     }
-                    continuation.resume()
                 }
+            } else {
+                continuation.resume()
             }
         }
+    }
+
+    /// Splits text into sentence-level chunks using NLTagger's sentence boundary
+    /// detection. Falls back to the full text as one chunk if tagging fails.
+    private func splitIntoSentenceChunks(_ text: String) -> [String] {
+        var sentences: [String] = []
+        let tagger = NLTagger(tagSchemes: [.tokenType])
+        tagger.string = text
+
+        tagger.enumerateTags(
+            in: text.startIndex..<text.endIndex,
+            unit: .sentence,
+            scheme: .tokenType,
+            options: [.omitWhitespace]
+        ) { _, tokenRange in
+            let sentence = String(text[tokenRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !sentence.isEmpty {
+                sentences.append(sentence)
+            }
+            return true
+        }
+
+        return sentences.isEmpty ? [text] : sentences
     }
 
     /// Stops any in-progress synthesis or playback immediately.

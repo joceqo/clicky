@@ -3,28 +3,61 @@
 //  leanring-buddy
 //
 //  Settings page shown inside the Clicky chat window when the user
-//  clicks the gear icon. Provides model selection, TTS/STT provider
-//  pickers, and API key configuration — all styled with the dark DS
-//  theme to match the rest of the chat window.
+//  clicks the gear icon. Organised into tabs so settings can grow
+//  without becoming a wall of scroll. Current tabs:
+//
+//  • Profile — name, goals, additional context (injected into Claude's system prompt)
+//  • General — model, TTS voice, STT speech, API keys
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
+
+/// Which tab is currently active in the settings view.
+private enum SettingsTab: String, CaseIterable {
+    case profile  = "Profile"
+    case learning = "Learning"
+    case general  = "General"
+}
 
 struct ChatSettingsView: View {
     @ObservedObject var companionManager: CompanionManager
     let onDismiss: () -> Void
 
+    @State private var selectedTab: SettingsTab = .profile
+
+    // General tab state
     @State private var apiKeyInput = ""
     @State private var isAPIKeyVisible = false
 
+    // Profile tab state — pre-filled from companionManager.userProfile on appear
+    @State private var profileNickname: String = ""
+    @State private var profileGoals: String = ""
+    @State private var profileAdditionalContext: String = ""
+    @State private var profileSaveStatus: String = ""
+
+    // Learning tab state
+    @State private var learningEntries: [LearningEntry] = []
+    @State private var learningDeleteConfirmID: UUID? = nil
+    @State private var exportStatus: String = ""
+
     var body: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 24) {
-                modelSection
-                voiceSection
-                speechSection
+        VStack(spacing: 0) {
+            tabBar
+
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 24) {
+                    switch selectedTab {
+                    case .profile:
+                        profileTab
+                    case .learning:
+                        learningTab
+                    case .general:
+                        generalTab
+                    }
+                }
+                .padding(24)
             }
-            .padding(24)
         }
         .background(DS.Colors.background)
         .navigationTitle("Settings")
@@ -38,6 +71,398 @@ struct ChatSettingsView: View {
                 apiKeyInput = companionManager.anthropicAPIKey
             }
             companionManager.fetchAvailableLMStudioModels()
+            let savedProfile = companionManager.userProfile
+            profileNickname = savedProfile.nickname
+            profileGoals = savedProfile.goals
+            profileAdditionalContext = savedProfile.additionalContext
+            learningEntries = companionManager.learningLogStore.loadAllEntries().reversed()
+        }
+    }
+
+    // MARK: - Tab Bar
+
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            ForEach(SettingsTab.allCases, id: \.self) { tab in
+                tabBarButton(tab: tab)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(DS.Colors.surface1)
+        .overlay(
+            Rectangle()
+                .fill(DS.Colors.borderSubtle)
+                .frame(height: 0.5),
+            alignment: .bottom
+        )
+    }
+
+    private func tabBarButton(tab: SettingsTab) -> some View {
+        let isSelected = selectedTab == tab
+        return Button(action: { selectedTab = tab }) {
+            Text(tab.rawValue)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    // MARK: - Profile Tab
+
+    private var profileTab: some View {
+        settingsSection(title: "Profile") {
+            VStack(alignment: .leading, spacing: 12) {
+                settingsHint("Tell Clicky who you are. This gets added to every conversation so responses are always personalized to you.")
+
+                // Name
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Your name")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    TextField("e.g. joce", text: $profileNickname)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.white.opacity(0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                        )
+                }
+
+                // Goals
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Goals")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    settingsHint("What you want to get better at or accomplish")
+
+                    profileTextEditor(
+                        placeholder: "e.g. get better at coding, create nice projects, do more with less",
+                        text: $profileGoals,
+                        minHeight: 56
+                    )
+                }
+
+                // Additional context
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Additional context")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    settingsHint("Preferred tools, learning style, current projects — anything useful")
+
+                    profileTextEditor(
+                        placeholder: "e.g. I'm learning DaVinci Resolve. I prefer concise answers with examples.",
+                        text: $profileAdditionalContext,
+                        minHeight: 72
+                    )
+                }
+
+                // Save
+                HStack {
+                    if !profileSaveStatus.isEmpty {
+                        settingsHint(profileSaveStatus)
+                    }
+                    Spacer()
+                    Button(action: saveProfile) {
+                        Text("Save")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(DS.Colors.textPrimary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(DS.Colors.accent.opacity(0.85))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                }
+            }
+        }
+    }
+
+    private func saveProfile() {
+        let updatedProfile = UserProfile(
+            nickname: profileNickname,
+            goals: profileGoals,
+            additionalContext: profileAdditionalContext
+        )
+        companionManager.saveUserProfile(updatedProfile)
+        profileSaveStatus = "Saved"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            profileSaveStatus = ""
+        }
+    }
+
+    /// A styled multi-line text editor. SwiftUI's TextEditor has no placeholder support,
+    /// so we layer a greyed-out hint label behind it when the binding is empty.
+    private func profileTextEditor(placeholder: String, text: Binding<String>, minHeight: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            if text.wrappedValue.isEmpty {
+                Text(placeholder)
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 10)
+                    .allowsHitTesting(false)
+            }
+
+            TextEditor(text: text)
+                .font(.system(size: 12))
+                .foregroundColor(DS.Colors.textPrimary)
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .frame(minHeight: minHeight)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+
+    // MARK: - Learning Tab
+
+    private var learningTab: some View {
+        VStack(spacing: 16) {
+            settingsSection(title: "Learning Log") {
+                VStack(alignment: .leading, spacing: 10) {
+                    settingsHint("Clicky silently logs every topic you learn about. Use this to review, quiz yourself, or see what you haven't covered yet.")
+
+                    if learningEntries.isEmpty {
+                        settingsHint("No entries yet — start asking Clicky questions about any app or topic.")
+                            .padding(.top, 4)
+                    } else {
+                        // Group by app
+                        let grouped = Dictionary(grouping: learningEntries) { $0.app }
+                        let sortedApps = grouped.keys.sorted()
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(sortedApps, id: \.self) { app in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(app)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(DS.Colors.textSecondary)
+
+                                    ForEach(grouped[app] ?? []) { entry in
+                                        learningEntryRow(entry)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Clear all + Export row
+                        HStack(spacing: 8) {
+                            if !exportStatus.isEmpty {
+                                Text(exportStatus)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(DS.Colors.textTertiary)
+                            }
+                            Spacer()
+                            Button(action: exportLearningLogAsMarkdown) {
+                                Text("Export .md")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(DS.Colors.textSecondary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                            .fill(Color.white.opacity(0.06))
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .pointerCursor()
+
+                            Button(action: {
+                                companionManager.learningLogStore.clearAllEntries()
+                                learningEntries = []
+                            }) {
+                                Text("Clear all")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(DS.Colors.textTertiary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                            .fill(Color.white.opacity(0.06))
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .pointerCursor()
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+            }
+
+            settingsSection(title: "Daily Review") {
+                VStack(alignment: .leading, spacing: 10) {
+                    settingsHint("Get a morning nudge with yesterday's topics and a prompt to quiz yourself. Claude generates the questions fresh — no pre-cooked flashcards.")
+
+                    HStack {
+                        Text("Daily review notification")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(DS.Colors.textSecondary)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { companionManager.isDailyReviewEnabled },
+                            set: { companionManager.setDailyReviewEnabled($0) }
+                        ))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .tint(DS.Colors.accent)
+                        .scaleEffect(0.8)
+                    }
+
+                    if companionManager.isDailyReviewEnabled {
+                        HStack {
+                            Text("Notify at")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(DS.Colors.textSecondary)
+                            Spacer()
+                            // Hour picker: 6am–10pm in readable labels
+                            Picker("", selection: Binding(
+                                get: { companionManager.dailyReviewHour },
+                                set: { companionManager.setDailyReviewHour($0) }
+                            )) {
+                                ForEach(reviewHourOptions, id: \.hour) { option in
+                                    Text(option.label).tag(option.hour)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .frame(width: 90)
+                        }
+                    }
+                }
+            }
+
+            settingsSection(title: "Quiz") {
+                VStack(alignment: .leading, spacing: 8) {
+                    settingsHint("Ask Clicky to quiz you on what you've learned. Type in the chat window:")
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        quizExampleRow("Quiz me on DaVinci Resolve")
+                        quizExampleRow("What did I learn this week?")
+                        quizExampleRow("What haven't I covered in Swift yet?")
+                        quizExampleRow("Summarize my Resolve knowledge")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hour options shown in the daily review time picker. Range: 6am–10pm.
+    private var reviewHourOptions: [(hour: Int, label: String)] {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h a"
+        return (6...22).map { hour in
+            var components = DateComponents()
+            components.hour = hour
+            components.minute = 0
+            let date = Calendar.current.date(from: components) ?? Date()
+            return (hour: hour, label: formatter.string(from: date))
+        }
+    }
+
+    /// Opens an NSSavePanel and writes the learning log as a Markdown file.
+    private func exportLearningLogAsMarkdown() {
+        let savePanel = NSSavePanel()
+        savePanel.title = "Export Learning Log"
+        savePanel.nameFieldStringValue = "clicky-learning-log.md"
+        savePanel.allowedContentTypes = [.plainText]
+        savePanel.canCreateDirectories = true
+
+        guard savePanel.runModal() == .OK, let url = savePanel.url else { return }
+
+        let markdownContent = companionManager.learningLogStore.exportAsMarkdown()
+        do {
+            try markdownContent.write(to: url, atomically: true, encoding: .utf8)
+            exportStatus = "Exported"
+            // Clear the status after 3 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                exportStatus = ""
+            }
+        } catch {
+            exportStatus = "Export failed"
+            print("⚠️ Learning log export failed: \(error)")
+        }
+    }
+
+    private func learningEntryRow(_ entry: LearningEntry) -> some View {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .none
+
+        return HStack {
+            Text(entry.topic)
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textPrimary)
+            Spacer()
+            Text(formatter.string(from: entry.date))
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textTertiary)
+            Button(action: {
+                companionManager.learningLogStore.deleteEntry(withID: entry.id)
+                learningEntries = companionManager.learningLogStore.loadAllEntries().reversed()
+            }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color.white.opacity(0.04))
+        )
+    }
+
+    private func quizExampleRow(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(DS.Colors.textTertiary)
+            Text(text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(DS.Colors.textSecondary)
+        }
+    }
+
+    // MARK: - General Tab
+
+    private var generalTab: some View {
+        Group {
+            modelSection
+            voiceSection
+            speechSection
+            voiceDisplaySection
+            actionsSection
         }
     }
 
@@ -115,10 +540,10 @@ struct ChatSettingsView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
-                )
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+            )
         }
         .buttonStyle(.plain)
         .pointerCursor()
@@ -162,12 +587,9 @@ struct ChatSettingsView: View {
 
     private var selectedModelProvider: String {
         switch companionManager.selectedModel {
-        case "lmstudio":
-            return "lmstudio"
-        case "local":
-            return "local"
-        default:
-            return "anthropic"
+        case "lmstudio": return "lmstudio"
+        case "local":    return "local"
+        default:         return "anthropic"
         }
     }
 
@@ -522,6 +944,129 @@ struct ChatSettingsView: View {
                 .scaleEffect(0.8)
             }
         }
+    }
+
+    // MARK: - Voice
+
+    private var voiceDisplaySection: some View {
+        settingsSection(title: "Voice Display") {
+            actionToggleRow(
+                label: "Show streaming text during voice",
+                hint: "Response appears as a bubble while Claude is generating — before TTS starts",
+                isOn: Binding(
+                    get: { companionManager.isVoiceStreamingTextEnabled },
+                    set: { companionManager.setVoiceStreamingTextEnabled($0) }
+                )
+            )
+        }
+    }
+
+    // MARK: - Actions
+
+    /// Toggles that control which action tags Claude is allowed to execute.
+    /// Each toggle maps directly to a flag in CompanionManager that gates the
+    /// corresponding executor — turning one off means the tag is still stripped
+    /// from the response text, but the action is never performed.
+    private var actionsSection: some View {
+        settingsSection(title: "Actions") {
+            VStack(spacing: 0) {
+                actionToggleRow(
+                    label: "Track learning topics",
+                    hint: "Log [LOG:] tags to the Learning tab",
+                    isOn: Binding(
+                        get: { companionManager.isLearningLogEnabled },
+                        set: { companionManager.setLearningLogEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Open URLs and apps",
+                    hint: "Execute [OPEN:] tags via NSWorkspace",
+                    isOn: Binding(
+                        get: { companionManager.isOpenActionEnabled },
+                        set: { companionManager.setOpenActionEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Run Apple Shortcuts",
+                    hint: "Execute [SHORTCUT:] tags via the shortcuts CLI",
+                    isOn: Binding(
+                        get: { companionManager.isShortcutActionEnabled },
+                        set: { companionManager.setShortcutActionEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Create reminders",
+                    hint: "Execute [REMIND:] tags via Reminders.app",
+                    isOn: Binding(
+                        get: { companionManager.isRemindActionEnabled },
+                        set: { companionManager.setRemindActionEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Control music",
+                    hint: "Execute [MUSIC:] tags — works with Spotify, Apple Music, YouTube, etc.",
+                    isOn: Binding(
+                        get: { companionManager.isMusicActionEnabled },
+                        set: { companionManager.setMusicActionEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Click UI elements",
+                    hint: "Execute [CLICK:] tags — simulates mouse clicks at screen coordinates (voice only)",
+                    isOn: Binding(
+                        get: { companionManager.isClickActionEnabled },
+                        set: { companionManager.setClickActionEnabled($0) }
+                    )
+                )
+            }
+        }
+    }
+
+    private func actionToggleRow(label: String, hint: String, isOn: Binding<Bool>) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Text(hint)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .tint(DS.Colors.accent)
+                .scaleEffect(0.8)
+        }
+        .padding(.vertical, 6)
     }
 
     // MARK: - Reusable Components
