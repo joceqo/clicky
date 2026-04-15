@@ -13,6 +13,10 @@ import SwiftUI
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
     @State private var emailInput: String = ""
+    @State private var apiKeyInput: String = ""
+    @State private var lmStudioAPIKeyInput: String = ""
+    @State private var isLMStudioAPIKeyVisible: Bool = false
+    @State private var isShowingSettings: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -25,12 +29,18 @@ struct CompanionPanelView: View {
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
 
-            if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-                Spacer()
-                    .frame(height: 12)
+            if companionManager.hasCompletedOnboarding {
+                if isShowingSettings {
+                    settingsGearPanel
+                        .padding(.top, 12)
+                        .padding(.horizontal, 16)
+                } else {
+                    Spacer()
+                        .frame(height: 12)
 
-                modelPickerRow
-                    .padding(.horizontal, 16)
+                    modelPickerRow
+                        .padding(.horizontal, 16)
+                }
             }
 
             if !companionManager.allPermissionsGranted {
@@ -102,6 +112,25 @@ struct CompanionPanelView: View {
             Text(statusText)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textTertiary)
+
+            if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
+                Button(action: {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                        isShowingSettings.toggle()
+                    }
+                }) {
+                    Image(systemName: "gear")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(isShowingSettings ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                        .frame(width: 20, height: 20)
+                        .background(
+                            Circle()
+                                .fill(isShowingSettings ? Color.white.opacity(0.12) : Color.white.opacity(0.08))
+                        )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            }
 
             Button(action: {
                 NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
@@ -599,25 +628,46 @@ struct CompanionPanelView: View {
     // MARK: - Model Picker
 
     private var modelPickerRow: some View {
-        HStack {
-            Text("Model")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
+        VStack(spacing: 6) {
+            HStack {
+                Text("Model")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
 
-            Spacer()
+                Spacer()
 
-            HStack(spacing: 0) {
-                modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
-                modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                HStack(spacing: 0) {
+                    modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
+                    modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                    modelOptionButton(label: "LM Studio", modelID: "lmstudio")
+                    modelOptionButton(label: "Local", modelID: "local")
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
             }
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-            )
+
+            if companionManager.selectedModel == "lmstudio" {
+                Text("Vision · local · configure in ⚙")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            } else if companionManager.selectedModel == "local" && !companionManager.isAppleIntelligenceAvailable {
+                Text("Requires macOS 26+ with Apple Intelligence enabled")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.warning)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            } else if companionManager.selectedModel == "local" {
+                Text("Text-only · no screenshots · on-device")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
         }
         .padding(.vertical, 4)
     }
@@ -626,6 +676,418 @@ struct CompanionPanelView: View {
         let isSelected = companionManager.selectedModel == modelID
         return Button(action: {
             companionManager.setSelectedModel(modelID)
+        }) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    // MARK: - Settings Gear Panel
+
+    private var settingsGearPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Anthropic API Key
+            apiKeyRow
+
+            // TTS provider
+            ttsProviderPickerRow
+
+            // STT provider
+            sttProviderPickerRow
+
+            // LM Studio section
+            VStack(spacing: 6) {
+                HStack {
+                    Text("LM Studio")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    Spacer()
+
+                    Button(action: {
+                        companionManager.fetchAvailableLMStudioModels()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("Refresh")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color.white.opacity(0.1))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                }
+
+                // LM Studio model dropdown
+                if companionManager.availableLMStudioModels.isEmpty {
+                    Text("No models found — is LM Studio running on port 1234?")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Menu {
+                        ForEach(companionManager.availableLMStudioModels, id: \.self) { modelID in
+                            Button(action: {
+                                companionManager.setSelectedLMStudioModel(modelID)
+                            }) {
+                                HStack {
+                                    Text(modelID)
+                                    if companionManager.selectedLMStudioModel == modelID {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            Text(companionManager.selectedLMStudioModel.isEmpty
+                                 ? "Select model..."
+                                 : companionManager.selectedLMStudioModel)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(companionManager.selectedLMStudioModel.isEmpty
+                                                 ? DS.Colors.textTertiary
+                                                 : DS.Colors.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+
+                            Spacer()
+
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(DS.Colors.textTertiary)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.white.opacity(0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                        )
+                    }
+                    .menuStyle(.borderlessButton)
+                }
+
+                // LM Studio API key (optional)
+                HStack(spacing: 6) {
+                    ZStack(alignment: .leading) {
+                        if lmStudioAPIKeyInput.isEmpty && companionManager.lmStudioAPIKey.isEmpty {
+                            Text("API Key (optional — most setups skip this)")
+                                .font(.system(size: 11))
+                                .foregroundColor(DS.Colors.textTertiary)
+                        }
+
+                        if isLMStudioAPIKeyVisible {
+                            TextField("", text: $lmStudioAPIKeyInput)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(DS.Colors.textPrimary)
+                        } else {
+                            SecureField("", text: $lmStudioAPIKeyInput)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(DS.Colors.textPrimary)
+                        }
+                    }
+
+                    Button(action: {
+                        isLMStudioAPIKeyVisible.toggle()
+                    }) {
+                        Image(systemName: isLMStudioAPIKeyVisible ? "eye.slash.fill" : "eye.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(DS.Colors.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+
+                    if !lmStudioAPIKeyInput.isEmpty {
+                        Button(action: {
+                            companionManager.setLMStudioAPIKey(lmStudioAPIKeyInput)
+                        }) {
+                            Text("Save")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(DS.Colors.textPrimary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .fill(Color.white.opacity(0.1))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .pointerCursor()
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
+                .onSubmit {
+                    companionManager.setLMStudioAPIKey(lmStudioAPIKeyInput)
+                }
+
+                // OCR text extraction toggle — when on, screen text is extracted via
+                // Accessibility API or Vision OCR and prepended to the prompt before
+                // sending to LM Studio or Apple Intelligence. Lets text-only / weak-vision
+                // local models understand what's on screen without relying on image encoding.
+                HStack {
+                    Text("Screen text extraction (OCR)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    Spacer()
+
+                    Toggle("", isOn: Binding(
+                        get: { companionManager.isOCRExtractionEnabled },
+                        set: { companionManager.setOCRExtractionEnabled($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .tint(DS.Colors.accent)
+                    .scaleEffect(0.8)
+                }
+            }
+            .padding(.vertical, 4)
+            .onAppear {
+                if !companionManager.lmStudioAPIKey.isEmpty {
+                    lmStudioAPIKeyInput = companionManager.lmStudioAPIKey
+                }
+                companionManager.fetchAvailableLMStudioModels()
+            }
+        }
+    }
+
+    // MARK: - API Key
+
+    private var apiKeyRow: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text("API Key")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                if companionManager.isUsingDirectAPIKey {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(DS.Colors.success)
+                            .frame(width: 6, height: 6)
+                        Text("Direct")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(DS.Colors.success)
+                    }
+                } else {
+                    Text("Using proxy")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+            }
+
+            HStack(spacing: 6) {
+                SecureField("sk-ant-...", text: $apiKeyInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                    )
+                    .onSubmit {
+                        companionManager.setAnthropicAPIKey(apiKeyInput)
+                    }
+
+                if companionManager.isUsingDirectAPIKey {
+                    Button(action: {
+                        apiKeyInput = ""
+                        companionManager.setAnthropicAPIKey("")
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(DS.Colors.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                } else {
+                    Button(action: {
+                        companionManager.setAnthropicAPIKey(apiKeyInput)
+                    }) {
+                        Text("Save")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(DS.Colors.textPrimary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(Color.white.opacity(0.1))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                    .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .onAppear {
+            // Show masked version if key is already saved, or empty for new input
+            if companionManager.isUsingDirectAPIKey {
+                apiKeyInput = companionManager.anthropicAPIKey
+            }
+        }
+    }
+
+    // MARK: - TTS Provider Picker
+
+    private var ttsProviderPickerRow: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text("Voice")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                HStack(spacing: 0) {
+                    ttsProviderOptionButton(label: "ElevenLabs", providerID: "elevenlabs")
+                    ttsProviderOptionButton(label: "Supertonic", providerID: "supertonic")
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
+
+                Button(action: { companionManager.testCurrentTTSProvider() }) {
+                    Text("Test")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color.white.opacity(0.1))
+                        )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            }
+
+            if !companionManager.ttsTestStatus.isEmpty {
+                Text(companionManager.ttsTestStatus)
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func ttsProviderOptionButton(label: String, providerID: String) -> some View {
+        let isSelected = companionManager.selectedTTSProvider == providerID
+        return Button(action: {
+            companionManager.setSelectedTTSProvider(providerID)
+        }) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    // MARK: - STT Provider Picker
+
+    private var sttProviderPickerRow: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text("Speech")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                HStack(spacing: 0) {
+                    sttProviderOptionButton(label: "AssemblyAI", providerID: "assemblyai")
+                    sttProviderOptionButton(label: "Parakeet", providerID: "parakeet")
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
+
+                Button(action: { companionManager.testCurrentSTTProvider() }) {
+                    Text("Test")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color.white.opacity(0.1))
+                        )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            }
+
+            if !companionManager.sttTestStatus.isEmpty {
+                Text(companionManager.sttTestStatus)
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func sttProviderOptionButton(label: String, providerID: String) -> some View {
+        let isSelected = companionManager.selectedSTTProvider == providerID
+        return Button(action: {
+            companionManager.setSelectedSTTProvider(providerID)
         }) {
             Text(label)
                 .font(.system(size: 11, weight: .medium))

@@ -65,20 +65,202 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
+    /// Persists conversations and screenshots to Application Support.
+    let conversationStore = ConversationStore()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
-    /// Base URL for the Cloudflare Worker proxy. All API requests route
-    /// through this so keys never ship in the app binary.
+    /// Base URL for the Cloudflare Worker proxy. Used when no direct API key is set.
     private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
 
+    /// User-provided Anthropic API key for direct mode (no Worker needed).
+    /// When set, Claude requests go straight to api.anthropic.com.
+    /// Persisted to Keychain so it survives app restarts and stays secure.
+    @Published var anthropicAPIKey: String = KeychainHelper.load(forKey: "anthropicAPIKey")
+
+    func setAnthropicAPIKey(_ key: String) {
+        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        anthropicAPIKey = trimmedKey
+        KeychainHelper.save(trimmedKey, forKey: "anthropicAPIKey")
+        // Recreate the Claude client to use direct mode (or fall back to proxy)
+        claudeAPI = makeClaudeAPI()
+    }
+
+    /// Whether the app is using a direct Anthropic API key instead of the Worker proxy.
+    var isUsingDirectAPIKey: Bool {
+        !anthropicAPIKey.isEmpty
+    }
+
+    private func makeClaudeAPI() -> ClaudeAPI {
+        if !anthropicAPIKey.isEmpty {
+            return ClaudeAPI(apiKey: anthropicAPIKey, model: selectedModel)
+        } else {
+            return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
+        }
+    }
+
     private lazy var claudeAPI: ClaudeAPI = {
-        return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
+        return makeClaudeAPI()
     }()
 
     private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
         return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
     }()
+
+    private lazy var supertonicTTSClient: SupertonicTTSClient = {
+        return SupertonicTTSClient()
+    }()
+
+    /// On-device LLM client via Apple Intelligence (FoundationModels).
+    /// Text-only, no vision. Requires macOS 26+.
+    private lazy var apfelAPI: ApfelAPI = {
+        return ApfelAPI()
+    }()
+
+    /// OpenAI-compatible API client for LM Studio (local vision models).
+    /// Talks to LM Studio's /v1/chat/completions endpoint at 127.0.0.1:1234.
+    private lazy var lmStudioAPI: OpenAIAPI = {
+        return OpenAIAPI(apiKey: lmStudioAPIKey, model: selectedLMStudioModel)
+    }()
+
+    /// Whether the selected model is the local on-device Apple Intelligence model.
+    var isLocalModel: Bool {
+        selectedModel == "local"
+    }
+
+    /// Whether the selected model is a local LM Studio model.
+    var isLMStudioModel: Bool {
+        selectedModel == "lmstudio"
+    }
+
+    /// Whether Apple Intelligence is available for local text-only mode.
+    var isAppleIntelligenceAvailable: Bool {
+        apfelAPI.isAvailable
+    }
+
+    // MARK: - LM Studio Configuration
+
+    /// User-provided LM Studio API key (optional — many local setups don't require one).
+    /// Persisted to Keychain so it survives app restarts and stays secure.
+    @Published var lmStudioAPIKey: String = KeychainHelper.load(forKey: "lmStudioAPIKey")
+
+    func setLMStudioAPIKey(_ key: String) {
+        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        lmStudioAPIKey = trimmedKey
+        KeychainHelper.save(trimmedKey, forKey: "lmStudioAPIKey")
+        lmStudioAPI.apiKey = trimmedKey
+    }
+
+    /// The model ID selected from LM Studio's available models.
+    /// Persisted separately from the Claude model selection.
+    @Published var selectedLMStudioModel: String = UserDefaults.standard.string(forKey: "selectedLMStudioModel") ?? ""
+
+    func setSelectedLMStudioModel(_ model: String) {
+        selectedLMStudioModel = model
+        UserDefaults.standard.set(model, forKey: "selectedLMStudioModel")
+        lmStudioAPI.model = model
+    }
+
+    /// Models discovered from LM Studio's /v1/models endpoint.
+    @Published var availableLMStudioModels: [String] = []
+
+    /// Whether to extract on-screen text via Accessibility API or Vision OCR before
+    /// sending a query to local models (Apple Intelligence) or LM Studio.
+    ///
+    /// When enabled, the extracted text is prepended to the user's spoken prompt so
+    /// that text-only models (Apple Intelligence) gain screen context and LM Studio
+    /// models with weak vision can still read what's on screen without depending
+    /// entirely on image encoding. Defaults to true. Persisted to UserDefaults.
+    @Published var isOCRExtractionEnabled: Bool = UserDefaults.standard.object(forKey: "isOCRExtractionEnabled") as? Bool ?? true
+
+    func setOCRExtractionEnabled(_ enabled: Bool) {
+        isOCRExtractionEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isOCRExtractionEnabled")
+    }
+
+    /// Queries LM Studio's local /v1/models endpoint and populates the model dropdown.
+    func fetchAvailableLMStudioModels() {
+        guard let url = URL(string: "http://127.0.0.1:1234/v1/models") else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        if !lmStudioAPIKey.isEmpty {
+            request.setValue("Bearer \(lmStudioAPIKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        Task {
+            do {
+                let (data, _) = try await URLSession.shared.data(for: request)
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let dataArray = json["data"] as? [[String: Any]] {
+                    var models = dataArray.compactMap { $0["id"] as? String }
+                        .filter { modelID in
+                            // Filter out SHA hashes (unloaded models) and speech tokenizer sub-models.
+                            // Readable model IDs contain a "/" (e.g. "google/gemma-4-e4b") or
+                            // a hyphen-separated name (e.g. "text-embedding-nomic-embed-text-v1.5").
+                            let looksLikeHash = modelID.range(of: "^[0-9a-f]{20,}$", options: .regularExpression) != nil
+                            let isSpeechTokenizer = modelID.contains("/speech_tokenizer")
+                            return !looksLikeHash && !isSpeechTokenizer
+                        }
+                    models.sort()
+                    self.availableLMStudioModels = models
+                    // Auto-select first model if none selected yet
+                    if selectedLMStudioModel.isEmpty, let firstModel = models.first {
+                        setSelectedLMStudioModel(firstModel)
+                    }
+                }
+            } catch {
+                // LM Studio unreachable — clear the list so it drops from the model cycler
+                if !self.availableLMStudioModels.isEmpty {
+                    print("[LMStudio] Lost connection, clearing model list")
+                    self.availableLMStudioModels = []
+                }
+            }
+        }
+    }
+
+    private var lmStudioPollingTask: Task<Void, Never>?
+
+    /// Polls LM Studio's /v1/models endpoint every 30 seconds so the model
+    /// cycler (⌃M) picks up LM Studio whenever it starts or stops.
+    private func startLMStudioModelPolling() {
+        lmStudioPollingTask?.cancel()
+        lmStudioPollingTask = Task { @MainActor in
+            while !Task.isCancelled {
+                fetchAvailableLMStudioModels()
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
+    }
+
+    /// Which TTS backend to use for voice responses. "elevenlabs" or "supertonic".
+    /// Persisted to UserDefaults so the choice survives app restarts.
+    @Published var selectedTTSProvider: String = UserDefaults.standard.string(forKey: "selectedTTSProvider") ?? "elevenlabs"
+
+    func setSelectedTTSProvider(_ provider: String) {
+        stopActiveTTSPlayback()
+        selectedTTSProvider = provider
+        UserDefaults.standard.set(provider, forKey: "selectedTTSProvider")
+    }
+
+    /// Which STT backend to use for voice transcription. "assemblyai" or "parakeet".
+    /// Persisted to UserDefaults so the choice survives app restarts.
+    @Published var selectedSTTProvider: String = UserDefaults.standard.string(forKey: "selectedSTTProvider") ?? "assemblyai"
+
+    func setSelectedSTTProvider(_ provider: String) {
+        selectedSTTProvider = provider
+        UserDefaults.standard.set(provider, forKey: "selectedSTTProvider")
+
+        let providerInstance: any BuddyTranscriptionProvider
+        switch provider {
+        case "parakeet":
+            providerInstance = BuddyTranscriptionProviderFactory.makeProvider(
+                for: .parakeet)
+        default:
+            providerInstance = BuddyTranscriptionProviderFactory.makeProvider(
+                for: .assemblyAI)
+        }
+        buddyDictationManager.switchTranscriptionProvider(to: providerInstance)
+    }
 
     /// Conversation history so Claude remembers prior exchanges within a session.
     /// Each entry is the user's transcript and Claude's response.
@@ -89,6 +271,7 @@ final class CompanionManager: ObservableObject {
     private var currentResponseTask: Task<Void, Never>?
 
     private var shortcutTransitionCancellable: AnyCancellable?
+    private var modelCycleCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
@@ -107,13 +290,109 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
+    /// All conversations, sorted by most recent activity. Drives the sidebar.
+    @Published var conversations: [Conversation] = []
+
+    /// The ID of the currently active conversation. Messages shown in the
+    /// chat window belong to this conversation.
+    @Published var activeConversationID: UUID?
+
+    /// All messages in the active conversation, ordered oldest-first.
+    /// Includes both voice (push-to-talk) and text (typed) exchanges so the
+    /// chat window shows the full session history regardless of input method.
+    @Published var chatMessages: [ChatMessage] = []
+
+    /// True while a text-chat message is being sent and Claude is streaming a
+    /// response. Used by ChatView to disable the send button and show the
+    /// typing indicator.
+    @Published private(set) var isSendingChatMessage: Bool = false
+
     /// The Claude model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+
+    /// Set briefly after a model cycle to show the icon badge on the cursor overlay.
+    /// Cleared automatically after the display duration.
+    @Published var modelSwitchBadgeModelID: String? = nil
+    private var modelSwitchBadgeDismissTask: Task<Void, Never>?
+
+    /// The actual model identifier to store in message metadata. For Claude models
+    /// this is the model ID (e.g. "claude-sonnet-4-6"). For LM Studio, this is the
+    /// real model name (e.g. "gemma-4-2b") so the JSON log is useful for debugging.
+    var resolvedModelIDForMessages: String {
+        switch selectedModel {
+        case "lmstudio":
+            return selectedLMStudioModel.isEmpty ? "lmstudio" : selectedLMStudioModel
+        default:
+            return selectedModel
+        }
+    }
+
+    /// The last-used Anthropic model. Persisted so the ⌃M cycler remembers
+    /// whether you prefer Sonnet or Opus. Defaults to Sonnet (cheaper).
+    @Published var lastUsedAnthropicModel: String = UserDefaults.standard.string(forKey: "lastUsedAnthropicModel") ?? "claude-sonnet-4-6"
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
-        claudeAPI.model = model
+        // Only update claudeAPI.model for actual Claude model IDs
+        if model != "local" && model != "lmstudio" {
+            claudeAPI.model = model
+            // Remember which Anthropic model was last used
+            lastUsedAnthropicModel = model
+            UserDefaults.standard.set(model, forKey: "lastUsedAnthropicModel")
+        }
+    }
+
+    /// Models the user can actually use right now, based on API key availability
+    /// and service reachability. Used by the keyboard shortcut model cycler.
+    /// Shows one Anthropic slot (last-used model, defaulting to Sonnet).
+    var availableModels: [String] {
+        var models: [String] = []
+        // Anthropic: one slot using the last-used Claude model (Sonnet or Opus)
+        if isUsingDirectAPIKey || !Self.workerBaseURL.contains("your-worker-name") {
+            models.append(lastUsedAnthropicModel)
+        }
+        // LM Studio: available if at least one model was discovered
+        if !availableLMStudioModels.isEmpty {
+            models.append("lmstudio")
+        }
+        // Apple Intelligence: available if macOS 26+ and FoundationModels present
+        if isAppleIntelligenceAvailable {
+            models.append("local")
+        }
+        return models
+    }
+
+    /// Cycles to the next available model in the list. Wraps around at the end.
+    /// Briefly shows a model icon badge on the Clicky cursor overlay.
+    func cycleToNextModel() {
+        let models = availableModels
+        print("[ModelCycler] cycleToNextModel called — available: \(models), current: \(selectedModel)")
+        guard models.count > 1 else {
+            print("[ModelCycler] Only \(models.count) model(s) available, skipping cycle")
+            return
+        }
+        if let currentIndex = models.firstIndex(of: selectedModel) {
+            let nextIndex = (currentIndex + 1) % models.count
+            print("[ModelCycler] Cycling \(selectedModel) → \(models[nextIndex])")
+            setSelectedModel(models[nextIndex])
+        } else {
+            print("[ModelCycler] Current model not in available list, jumping to \(models[0])")
+            setSelectedModel(models[0])
+        }
+        showModelSwitchBadge()
+    }
+
+    /// Shows the model icon badge on the cursor overlay, then auto-dismisses.
+    private func showModelSwitchBadge() {
+        modelSwitchBadgeDismissTask?.cancel()
+        modelSwitchBadgeModelID = selectedModel
+        print("[ModelCycler] Badge shown: \(selectedModel)")
+        modelSwitchBadgeDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard !Task.isCancelled else { return }
+            modelSwitchBadgeModelID = nil
+        }
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -173,15 +452,43 @@ final class CompanionManager: ObservableObject {
     }
 
     func start() {
+        // Migrate API keys from UserDefaults to Keychain (one-time, safe to call every launch)
+        KeychainHelper.migrateFromUserDefaultsIfNeeded(userDefaultsKey: "anthropicAPIKey", keychainKey: "anthropicAPIKey")
+        KeychainHelper.migrateFromUserDefaultsIfNeeded(userDefaultsKey: "lmStudioAPIKey", keychainKey: "lmStudioAPIKey")
+        // Re-read from Keychain in case migration just happened
+        anthropicAPIKey = KeychainHelper.load(forKey: "anthropicAPIKey")
+        lmStudioAPIKey = KeychainHelper.load(forKey: "lmStudioAPIKey")
+
+        // Migrate legacy single-history format if needed, then load conversations
+        conversationStore.migrateFromLegacyHistoryIfNeeded()
+        conversations = conversationStore.loadConversationsIndex()
+
+        // Always start a fresh conversation on launch so voice/text exchanges
+        // don't pile into the previous session. Old conversations stay in the
+        // sidebar for reference.
+        createNewConversation()
+
         refreshAllPermissions()
         print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+
+        // Restore the user's saved STT provider from UserDefaults so it
+        // survives app restarts (BuddyDictationManager defaults to Info.plist).
+        if selectedSTTProvider == "parakeet" {
+            let parakeetProvider = BuddyTranscriptionProviderFactory.makeProvider(for: .parakeet)
+            buddyDictationManager.switchTranscriptionProvider(to: parakeetProvider)
+        }
+
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
+
+        // Discover LM Studio models at startup and re-check periodically so
+        // the model cycler picks up LM Studio whenever it starts or stops.
+        startLMStudioModelPolling()
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
@@ -191,6 +498,139 @@ final class CompanionManager: ObservableObject {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
+        }
+    }
+
+    // MARK: - Conversation Management
+
+    /// Switches to a different conversation, saving the current one first.
+    /// Rebuilds the API conversation history from the loaded messages so
+    /// Claude has context within the new conversation.
+    func switchToConversation(_ conversationID: UUID) {
+        guard conversationID != activeConversationID else { return }
+        guard !isSendingChatMessage else { return }
+
+        // Save current conversation in the background so it doesn't block the
+        // switch. Capture the messages and ID before mutating state.
+        let previousMessages = chatMessages
+        let previousID = activeConversationID
+        if let previousID {
+            Task.detached(priority: .utility) { [conversationStore, conversations] in
+                conversationStore.saveMessages(previousMessages, for: previousID)
+                conversationStore.saveConversationsIndex(conversations)
+            }
+        }
+
+        activeConversationID = conversationID
+        chatMessages = conversationStore.loadMessages(for: conversationID)
+
+        // Rebuild the in-memory API context from the loaded messages so Claude
+        // has conversational context within this conversation (not cross-conversation)
+        rebuildConversationHistoryFromChatMessages()
+    }
+
+    /// Creates a new empty conversation, prepends it to the sidebar list,
+    /// and makes it active.
+    func createNewConversation() {
+        // Save current conversation before switching away
+        saveActiveConversationToDisk()
+
+        let newConversation = conversationStore.createConversation()
+        conversations.insert(newConversation, at: 0)
+        conversationStore.saveConversationsIndex(conversations)
+
+        activeConversationID = newConversation.id
+        chatMessages = []
+        conversationHistory = []
+    }
+
+    /// Deletes a conversation from disk and the sidebar list. If the deleted
+    /// conversation was active, switches to the most recent remaining one
+    /// or creates a new empty conversation.
+    func deleteConversation(_ conversationID: UUID) {
+        conversationStore.deleteConversation(id: conversationID)
+        conversations.removeAll { $0.id == conversationID }
+        conversationStore.saveConversationsIndex(conversations)
+
+        if conversationID == activeConversationID {
+            if let mostRecent = conversations.first {
+                activeConversationID = nil // Force switchToConversation to proceed
+                switchToConversation(mostRecent.id)
+            } else {
+                activeConversationID = nil
+                createNewConversation()
+            }
+        }
+    }
+
+    /// Persists the current active conversation's messages and updates
+    /// its metadata in the index.
+    private func saveActiveConversationToDisk() {
+        guard let activeID = activeConversationID else { return }
+        conversationStore.saveMessages(chatMessages, for: activeID)
+        updateConversationMetadata(for: activeID)
+    }
+
+    /// Updates the metadata (updatedAt, messageCount) for a conversation
+    /// in the index and saves the index to disk.
+    private func updateConversationMetadata(for conversationID: UUID) {
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        conversations[conversationIndex].updatedAt = Date()
+        conversations[conversationIndex].messageCount = chatMessages.count
+        conversationStore.saveConversationsIndex(conversations)
+    }
+
+    /// Auto-titles a conversation from the first user message if the title
+    /// is still the default "New Chat".
+    private func autoTitleActiveConversationIfNeeded(from userText: String) {
+        guard let activeID = activeConversationID,
+              let conversationIndex = conversations.firstIndex(where: { $0.id == activeID }),
+              conversations[conversationIndex].title == "New Chat"
+        else { return }
+
+        let trimmedText = userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+
+        // Truncate to ~40 characters at a word boundary
+        let title: String
+        if trimmedText.count <= 40 {
+            title = trimmedText
+        } else {
+            let prefix = String(trimmedText.prefix(40))
+            if let lastSpace = prefix.lastIndex(of: " ") {
+                title = String(prefix[prefix.startIndex..<lastSpace])
+            } else {
+                title = prefix
+            }
+        }
+
+        conversations[conversationIndex].title = title
+    }
+
+    /// Rebuilds the in-memory `conversationHistory` (used for Claude API context)
+    /// from the current `chatMessages`. Takes the last 10 user-assistant pairs.
+    private func rebuildConversationHistoryFromChatMessages() {
+        conversationHistory = []
+
+        var pairIndex = 0
+        while pairIndex < chatMessages.count {
+            let message = chatMessages[pairIndex]
+            if message.role == .user,
+               pairIndex + 1 < chatMessages.count,
+               chatMessages[pairIndex + 1].role == .assistant {
+                conversationHistory.append((
+                    userTranscript: message.content,
+                    assistantResponse: chatMessages[pairIndex + 1].content
+                ))
+                pairIndex += 2
+            } else {
+                pairIndex += 1
+            }
+        }
+
+        // Keep only the last 10 exchanges
+        if conversationHistory.count > 10 {
+            conversationHistory.removeFirst(conversationHistory.count - 10)
         }
     }
 
@@ -295,6 +735,8 @@ final class CompanionManager: ObservableObject {
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        elevenLabsTTSClient.stopPlayback()
+        supertonicTTSClient.stopPlayback()
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
         audioPowerCancellable?.cancel()
@@ -468,6 +910,13 @@ final class CompanionManager: ObservableObject {
             .sink { [weak self] transition in
                 self?.handleShortcutTransition(transition)
             }
+
+        modelCycleCancellable = globalPushToTalkShortcutMonitor
+            .modelCyclePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.cycleToNextModel()
+            }
     }
 
     private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
@@ -493,7 +942,7 @@ final class CompanionManager: ObservableObject {
 
             // Cancel any in-progress response and TTS from a previous utterance
             currentResponseTask?.cancel()
-            elevenLabsTTSClient.stopPlayback()
+            stopActiveTTSPlayback()
             clearDetectedElementLocation()
 
             // Dismiss the onboarding prompt if it's showing
@@ -545,6 +994,7 @@ final class CompanionManager: ObservableObject {
     you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
+    - always respond in the same language the user spoke in. if they speak french, reply in french. if they speak english, reply in english. match their language exactly.
     - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
     - all lowercase, casual, warm. no emojis.
     - write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
@@ -576,6 +1026,113 @@ final class CompanionManager: ObservableObject {
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
 
+    /// System prompt for text-chat mode (chat window).
+    /// Unlike the voice prompt, this allows longer responses, encourages markdown
+    /// formatting, and omits the POINT tag instructions (no cursor overlay in chat).
+    private static let companionChatSystemPrompt = """
+    you're clicky, a friendly always-on companion that lives in the user's menu bar. \
+    the user is chatting with you via text in the clicky chat window. \
+    this is an ongoing conversation — you remember everything said before in this session, \
+    including any voice exchanges the user had earlier.
+
+    rules:
+    - always respond in the same language the user writes in. if they write in french, reply in french.
+    - you can give longer, more detailed responses than in voice mode — text doesn't have a length penalty.
+    - use markdown formatting when it helps: **bold** for emphasis, `code` for inline code, \
+    ```language blocks for multi-line code, bullet lists for steps. don't over-format casual replies.
+    - be direct and clear. avoid filler phrases like "certainly!" or "great question!".
+    - never say "simply" or "just".
+    - you can help with anything — coding, writing, analysis, general knowledge, brainstorming.
+    - don't end with a yes/no question like "want me to explain more?" — those are dead ends. \
+    if it fits, mention something bigger they could explore next.
+    """
+
+    // MARK: - Text Chat Pipeline
+
+    /// Sends a typed message from the chat window to Claude and streams the response
+    /// in-place into chatMessages. Unlike the voice pipeline, this does not use TTS,
+    /// does not capture a screenshot, and does not trigger cursor pointing — it's a
+    /// pure text exchange that shares the same conversation history as voice mode.
+    func sendChatTextMessage(_ userText: String) {
+        guard !userText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        let userMessage = ChatMessage(role: .user, content: userText, source: .text)
+        chatMessages.append(userMessage)
+
+        // Append an empty assistant placeholder that streaming will fill in.
+        // The chat view shows a typing indicator while this message has no content.
+        let assistantPlaceholder = ChatMessage(role: .assistant, content: "", source: .text, modelID: resolvedModelIDForMessages)
+        chatMessages.append(assistantPlaceholder)
+        let assistantPlaceholderID = assistantPlaceholder.id
+
+        isSendingChatMessage = true
+
+        Task {
+            defer { isSendingChatMessage = false }
+
+            do {
+                let responseStartTime = Date()
+
+                let historyForAPI = conversationHistory.map { entry in
+                    (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+                }
+
+                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                    images: [],
+                    systemPrompt: Self.companionChatSystemPrompt,
+                    conversationHistory: historyForAPI,
+                    userPrompt: userText,
+                    onTextChunk: { [weak self] accumulatedText in
+                        guard let self else { return }
+                        // analyzeImageStreaming delivers accumulated text (not just the new chunk),
+                        // so we set rather than append to keep the content accurate.
+                        if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
+                            self.chatMessages[messageIndex].content = accumulatedText
+                        }
+                    }
+                )
+
+                let responseDuration = Date().timeIntervalSince(responseStartTime)
+
+                // Ensure the final content is set (the last onTextChunk may not have
+                // fired if the stream ended without a trailing chunk)
+                if let messageIndex = chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
+                    chatMessages[messageIndex].content = fullResponseText
+                    chatMessages[messageIndex].responseDurationSeconds = responseDuration
+                }
+
+                // Share this exchange with the conversation history so future requests
+                // (voice or text) have context for what was already discussed
+                conversationHistory.append((
+                    userTranscript: userText,
+                    assistantResponse: fullResponseText
+                ))
+                if conversationHistory.count > 10 {
+                    conversationHistory.removeFirst(conversationHistory.count - 10)
+                }
+
+                print("🧠 Chat message sent. Conversation history: \(conversationHistory.count) exchanges")
+
+                // Auto-title the conversation from the first user message
+                autoTitleActiveConversationIfNeeded(from: userText)
+
+                // Persist the updated message list and metadata to disk
+                if let activeID = activeConversationID {
+                    conversationStore.saveMessages(chatMessages, for: activeID)
+                    updateConversationMetadata(for: activeID)
+                }
+
+            } catch {
+                // Replace the empty placeholder with a user-visible error so the
+                // chat doesn't silently show a blank bubble
+                if let messageIndex = chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
+                    chatMessages[messageIndex].content = "Something went wrong — please try again."
+                }
+                print("⚠️ Chat text error: \(error)")
+            }
+        }
+    }
+
     // MARK: - AI Response Pipeline
 
     /// Captures a screenshot, sends it along with the transcript to Claude,
@@ -592,33 +1149,150 @@ final class CompanionManager: ObservableObject {
             voiceState = .processing
 
             do {
-                // Capture all connected screens so the AI has full context
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                let fullResponseText: String
+                var screenCaptures: [CompanionScreenCapture] = []
 
-                guard !Task.isCancelled else { return }
-
-                // Build image labels with the actual screenshot pixel dimensions
-                // so Claude's coordinate space matches the image it sees. We
-                // scale from screenshot pixels to display points ourselves.
-                let labeledImages = screenCaptures.map { capture in
-                    let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-                    return (data: capture.imageData, label: capture.label + dimensionInfo)
-                }
-
-                // Pass conversation history so Claude remembers prior exchanges
-                let historyForAPI = conversationHistory.map { entry in
-                    (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
-                }
-
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
-                    conversationHistory: historyForAPI,
-                    userPrompt: transcript,
-                    onTextChunk: { _ in
-                        // No streaming text display — spinner stays until TTS plays
+                // For local models (Apple Intelligence) and LM Studio, attempt to extract
+                // visible on-screen text before sending the query. This gives text-only
+                // models (Apple Intelligence) screen context they'd otherwise have none of,
+                // and helps LM Studio models with weak vision by providing a text fallback
+                // alongside the screenshot.
+                var extractedScreenText: String? = nil
+                if isOCRExtractionEnabled && (isLocalModel || isLMStudioModel) {
+                    // Try OCR extraction with one retry. The Vision/Accessibility
+                    // frameworks can fail with "fopen failed for data file" right
+                    // after app launch before their caches are warm.
+                    for ocrAttempt in 1...2 {
+                        if let extractionResult = try? await TextExtractor().extract() {
+                            let trimmedText = extractionResult.fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmedText.isEmpty {
+                                extractedScreenText = trimmedText
+                                print("📄 OCR extracted \(trimmedText.count) chars via \(extractionResult.source)")
+                                print("📄 OCR text:\n\(trimmedText)")
+                                break
+                            }
+                        }
+                        if ocrAttempt == 1 {
+                            print("📄 OCR extraction failed, retrying after brief delay...")
+                            try await Task.sleep(nanoseconds: 300_000_000) // 300ms
+                        }
                     }
-                )
+                }
+
+                // Build the user prompt with screen text prepended when available.
+                // The format gives the model clear context about what text is on screen
+                // before the user's actual spoken question.
+                let userPromptWithScreenContext: String = {
+                    if let screenText = extractedScreenText {
+                        return "Here is the text visible on the user's screen:\n\n\(screenText)\n\nUser's question: \(transcript)"
+                    }
+                    return transcript
+                }()
+
+                let voiceResponseStartTime = Date()
+
+                if isLocalModel {
+                    // Local mode (Apple Intelligence): text-only, no screenshots, no pointing.
+                    // The on-device model has no vision capability, so we rely on OCR-extracted
+                    // screen text (when available) to give it context about the user's screen.
+                    let historyForAPI = conversationHistory.map { entry in
+                        (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+                    }
+
+                    // Update the system prompt to reflect whether screen text is available.
+                    // When OCR succeeded, tell the model it has that context; when it didn't,
+                    // keep the original "no screen access" framing so the model doesn't hallucinate.
+                    let localSystemPrompt: String
+                    if extractedScreenText != nil {
+                        localSystemPrompt = """
+                        you are clicky, a helpful voice assistant that lives in the user's menu bar on macOS. \
+                        you speak in a casual, friendly tone — short sentences, like talking to a friend. \
+                        you CAN see the user's screen. the text content of their screen has been extracted and \
+                        included below the user's question — this IS what's on their screen right now. treat it \
+                        as your vision. when the user asks about what's on screen, answer based on that text. \
+                        keep responses concise since they'll be spoken aloud. \
+                        CRITICAL: you MUST reply in the SAME language the user uses. if the user writes in French, \
+                        reply entirely in French. if in Spanish, reply in Spanish. match their language exactly.
+                        """
+                    } else {
+                        localSystemPrompt = """
+                        you are clicky, a helpful voice assistant that lives in the user's menu bar on macOS. \
+                        you speak in a casual, friendly tone — short sentences, like talking to a friend. \
+                        you don't have access to the user's screen in this mode, so just answer based on what they say. \
+                        keep responses concise since they'll be spoken aloud. \
+                        CRITICAL: you MUST reply in the SAME language the user uses. if the user writes in French, \
+                        reply entirely in French. if in Spanish, reply in Spanish. match their language exactly.
+                        """
+                    }
+
+                    let (responseText, _) = try await apfelAPI.chat(
+                        systemPrompt: localSystemPrompt,
+                        conversationHistory: historyForAPI,
+                        userPrompt: userPromptWithScreenContext
+                    )
+                    fullResponseText = responseText + " [POINT:none]"
+                } else if isLMStudioModel {
+                    // LM Studio mode: local vision model via OpenAI-compatible API.
+                    // Sends screenshots for visual context AND prepends OCR-extracted text
+                    // so weak vision models can still read the screen reliably.
+                    // Smaller screenshots (768px) for faster local inference.
+                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG(maxDimension: 768)
+
+                    guard !Task.isCancelled else { return }
+
+                    let labeledImages = screenCaptures.map { capture in
+                        let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                        return (data: capture.imageData, label: capture.label + dimensionInfo)
+                    }
+
+                    let historyForAPI = conversationHistory.map { entry in
+                        (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+                    }
+
+                    let lmStudioStartTime = Date()
+                    let (responseText, _) = try await lmStudioAPI.analyzeImageStreaming(
+                        images: labeledImages,
+                        systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                        conversationHistory: historyForAPI,
+                        userPrompt: userPromptWithScreenContext,
+                        onTextChunk: { _ in
+                            // No streaming text display — spinner stays until TTS plays
+                        }
+                    )
+                    let lmStudioElapsed = Date().timeIntervalSince(lmStudioStartTime)
+                    print("⏱️ LM Studio response: \(String(format: "%.1f", lmStudioElapsed))s")
+                    print("💬 LM Studio text: \(responseText)")
+                    fullResponseText = responseText
+                } else {
+                    // Cloud mode (Claude): full vision pipeline with screenshots and pointing
+                    screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+
+                    guard !Task.isCancelled else { return }
+
+                    // Build image labels with the actual screenshot pixel dimensions
+                    // so Claude's coordinate space matches the image it sees. We
+                    // scale from screenshot pixels to display points ourselves.
+                    let labeledImages = screenCaptures.map { capture in
+                        let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                        return (data: capture.imageData, label: capture.label + dimensionInfo)
+                    }
+
+                    // Pass conversation history so Claude remembers prior exchanges
+                    let historyForAPI = conversationHistory.map { entry in
+                        (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+                    }
+
+                    let (responseText, _) = try await claudeAPI.analyzeImageStreaming(
+                        images: labeledImages,
+                        systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                        conversationHistory: historyForAPI,
+                        userPrompt: transcript,
+                        onTextChunk: { _ in
+                            // No streaming text display — spinner stays until TTS plays
+                        }
+                    )
+                    fullResponseText = responseText
+                }
 
                 guard !Task.isCancelled else { return }
 
@@ -637,6 +1311,7 @@ final class CompanionManager: ObservableObject {
 
                 // Pick the screen capture matching Claude's screen number,
                 // falling back to the cursor screen if not specified.
+                // In local mode screenCaptures is empty so this returns nil.
                 let targetScreenCapture: CompanionScreenCapture? = {
                     if let screenNumber = parseResult.screenNumber,
                        screenNumber >= 1 && screenNumber <= screenCaptures.count {
@@ -693,6 +1368,69 @@ final class CompanionManager: ObservableObject {
                     conversationHistory.removeFirst(conversationHistory.count - 10)
                 }
 
+                // Auto-title the conversation from the first voice transcript
+                autoTitleActiveConversationIfNeeded(from: transcript)
+
+                // Mirror the voice exchange into chatMessages immediately so the chat
+                // window updates without waiting for screenshot compression to finish.
+                // The user message gets a pre-assigned UUID so screenshot files can be
+                // named after it even though they're saved asynchronously.
+                // Capture which app the user was looking at when they spoke
+                let frontmostApp = NSWorkspace.shared.frontmostApplication
+                let foregroundAppBundleID = frontmostApp?.bundleIdentifier
+                let foregroundAppName = frontmostApp?.localizedName
+
+                let voiceUserMessageID = UUID()
+                chatMessages.append(ChatMessage(
+                    id: voiceUserMessageID,
+                    role: .user,
+                    content: transcript,
+                    source: .voice,
+                    ocrText: extractedScreenText,
+                    foregroundAppBundleID: foregroundAppBundleID,
+                    foregroundAppName: foregroundAppName
+                ))
+                let voiceResponseDuration = Date().timeIntervalSince(voiceResponseStartTime)
+                chatMessages.append(ChatMessage(role: .assistant, content: spokenText, source: .voice, modelID: resolvedModelIDForMessages, responseDurationSeconds: voiceResponseDuration))
+
+                // Capture the active conversation ID now so the background screenshot
+                // save writes to the correct conversation even if the user switches
+                // conversations while TTS is playing.
+                let conversationIDForSave = activeConversationID
+
+                // Compress and save screenshots in a background task so it doesn't
+                // delay TTS playback. Once saved, update the message with file names
+                // and persist the conversation to disk.
+                let rawCaptureDataItems = screenCaptures.map { $0.imageData }
+                Task.detached(priority: .utility) { [weak self] in
+                    guard let self else { return }
+                    let savedFileNames = self.conversationStore.saveCompressedScreenshots(
+                        rawCaptureDataItems,
+                        forMessageWithID: voiceUserMessageID
+                    )
+                    await MainActor.run {
+                        if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == voiceUserMessageID }) {
+                            self.chatMessages[messageIndex].screenshotFileNames = savedFileNames
+                        }
+                        // Save to the conversation that was active when the voice
+                        // pipeline started, not necessarily the current active one
+                        if let saveID = conversationIDForSave {
+                            if saveID == self.activeConversationID {
+                                // Still on the same conversation — save chatMessages directly
+                                self.conversationStore.saveMessages(self.chatMessages, for: saveID)
+                                self.updateConversationMetadata(for: saveID)
+                            } else {
+                                // User switched away — load, patch, and save the original conversation
+                                var originalMessages = self.conversationStore.loadMessages(for: saveID)
+                                if let messageIndex = originalMessages.firstIndex(where: { $0.id == voiceUserMessageID }) {
+                                    originalMessages[messageIndex].screenshotFileNames = savedFileNames
+                                }
+                                self.conversationStore.saveMessages(originalMessages, for: saveID)
+                            }
+                        }
+                    }
+                }
+
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
 
                 ClickyAnalytics.trackAIResponseReceived(response: spokenText)
@@ -701,12 +1439,12 @@ final class CompanionManager: ObservableObject {
                 // until the audio actually starts playing, then switch to responding.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     do {
-                        try await elevenLabsTTSClient.speakText(spokenText)
+                        try await speakTextWithActiveTTSProvider(spokenText)
                         // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
                     } catch {
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
-                        print("⚠️ ElevenLabs TTS error: \(error)")
+                        print("⚠️ TTS error (\(selectedTTSProvider)): \(error)")
                         speakCreditsErrorFallback()
                     }
                 }
@@ -735,7 +1473,7 @@ final class CompanionManager: ObservableObject {
         transientHideTask?.cancel()
         transientHideTask = Task {
             // Wait for TTS audio to finish playing
-            while elevenLabsTTSClient.isPlaying {
+            while isActiveTTSPlaying {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard !Task.isCancelled else { return }
             }
@@ -753,6 +1491,160 @@ final class CompanionManager: ObservableObject {
             overlayWindowManager.fadeOutAndHideOverlay()
             isOverlayVisible = false
         }
+    }
+
+    // MARK: - TTS Provider Helpers
+
+    /// Routes a speak call to whichever TTS backend is currently selected.
+    private func speakTextWithActiveTTSProvider(_ text: String) async throws {
+        if selectedTTSProvider == "supertonic" {
+            try await supertonicTTSClient.speakText(text)
+        } else {
+            try await elevenLabsTTSClient.speakText(text)
+        }
+    }
+
+    /// Stops playback on whichever TTS backend is currently active.
+    private func stopActiveTTSPlayback() {
+        if selectedTTSProvider == "supertonic" {
+            supertonicTTSClient.stopPlayback()
+        } else {
+            elevenLabsTTSClient.stopPlayback()
+        }
+    }
+
+    /// True if the currently selected TTS backend has audio playing.
+    private var isActiveTTSPlaying: Bool {
+        if selectedTTSProvider == "supertonic" {
+            return supertonicTTSClient.isPlaying
+        } else {
+            return elevenLabsTTSClient.isPlaying
+        }
+    }
+
+    // MARK: - Test Helpers
+
+    /// Tests the Anthropic API key by sending a minimal request to Claude.
+    @Published private(set) var apiKeyTestStatus: String = ""
+
+    func testAnthropicAPIKey() {
+        guard isUsingDirectAPIKey else {
+            apiKeyTestStatus = "No API key set"
+            return
+        }
+        apiKeyTestStatus = "Testing..."
+        Task {
+            do {
+                let (responseText, _) = try await claudeAPI.analyzeImageStreaming(
+                    images: [],
+                    systemPrompt: "Respond with exactly: OK",
+                    conversationHistory: [],
+                    userPrompt: "ping",
+                    onTextChunk: { _ in }
+                )
+                if !responseText.isEmpty {
+                    apiKeyTestStatus = "✅ API key working"
+                } else {
+                    apiKeyTestStatus = "⚠️ Empty response"
+                }
+            } catch {
+                apiKeyTestStatus = "❌ \(error.localizedDescription)"
+                print("🔑 API key test error: \(error)")
+            }
+        }
+    }
+
+    /// Speaks a sample phrase using the currently selected TTS provider.
+    /// Used by the panel's test button to verify TTS without push-to-talk.
+    @Published private(set) var ttsTestStatus: String = ""
+
+    func testCurrentTTSProvider() {
+        ttsTestStatus = "Testing \(selectedTTSProvider)..."
+        Task {
+            do {
+                try await speakTextWithActiveTTSProvider("Hello! This is a test of the \(selectedTTSProvider) text to speech engine.")
+                ttsTestStatus = "✅ \(selectedTTSProvider) working"
+            } catch {
+                ttsTestStatus = "❌ \(error.localizedDescription)"
+                print("🔊 TTS test error: \(error)")
+            }
+        }
+    }
+
+    /// Records 3 seconds of mic audio and transcribes with the current STT provider.
+    @Published private(set) var sttTestStatus: String = ""
+
+    func testCurrentSTTProvider() {
+        sttTestStatus = "🎙️ Recording 3s..."
+        Task {
+            do {
+                let transcribedText = try await runShortSTTTest()
+                if transcribedText.isEmpty {
+                    sttTestStatus = "⚠️ No speech detected"
+                } else {
+                    sttTestStatus = "✅ \"\(transcribedText)\""
+                }
+            } catch {
+                sttTestStatus = "❌ \(error.localizedDescription)"
+                print("🎙️ STT test error: \(error)")
+            }
+        }
+    }
+
+    /// Records ~3 seconds of mic audio and runs it through the active STT provider.
+    private func runShortSTTTest() async throws -> String {
+        let audioEngine = AVAudioEngine()
+        let inputNode = audioEngine.inputNode
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
+
+        var capturedBuffers: [AVAudioPCMBuffer] = []
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: recordingFormat) { buffer, _ in
+            capturedBuffers.append(buffer)
+        }
+
+        audioEngine.prepare()
+        try audioEngine.start()
+
+        sttTestStatus = "🎙️ Speak now (3s)..."
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+
+        audioEngine.stop()
+        inputNode.removeTap(onBus: 0)
+
+        sttTestStatus = "⏳ Transcribing..."
+
+        var finalText = ""
+        let providerPreference: BuddyTranscriptionProviderFactory.PreferredProvider =
+            selectedSTTProvider == "parakeet" ? .parakeet : .assemblyAI
+        let testProvider = BuddyTranscriptionProviderFactory.makeProvider(for: providerPreference)
+
+        let session = try await testProvider.startStreamingSession(
+            keyterms: [],
+            onTranscriptUpdate: { text in
+                finalText = text
+            },
+            onFinalTranscriptReady: { text in
+                finalText = text
+            },
+            onError: { error in
+                print("🎙️ STT test session error: \(error)")
+            }
+        )
+
+        for buffer in capturedBuffers {
+            session.appendAudioBuffer(buffer)
+        }
+
+        session.requestFinalTranscript()
+
+        // Wait for finalization (up to 10s for model download on first use)
+        for _ in 0..<100 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            if !finalText.isEmpty { break }
+        }
+
+        return finalText
     }
 
     /// Speaks a hardcoded error message using macOS system TTS when API

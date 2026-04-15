@@ -262,8 +262,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         return AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
     }
 
-    private let transcriptionProvider: any BuddyTranscriptionProvider
-    private let audioEngine = AVAudioEngine()
+    private var transcriptionProvider: any BuddyTranscriptionProvider
+    private var audioEngine = AVAudioEngine()
     private var activeTranscriptionSession: (any BuddyStreamingTranscriptionSession)?
     private var activeStartSource: BuddyDictationStartSource?
     private var draftCallbacks: BuddyDictationDraftCallbacks?
@@ -285,6 +285,19 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         self.transcriptionProvider = transcriptionProvider
         self.transcriptionProviderDisplayName = transcriptionProvider.displayName
         super.init()
+    }
+
+    /// Swaps the active transcription provider between push-to-talk sessions.
+    /// Safe to call at any time — if a session is in progress the change takes
+    /// effect after the current session finishes.
+    func switchTranscriptionProvider(to provider: any BuddyTranscriptionProvider) {
+        guard !isDictationInProgress else {
+            print("⚠️ Transcription: provider switch deferred — session in progress")
+            return
+        }
+        transcriptionProvider = provider
+        transcriptionProviderDisplayName = provider.displayName
+        print("🎙️ Transcription: switched to \(provider.displayName)")
     }
 
     func updateContextualKeyterms(_ contextualKeyterms: [String]) {
@@ -546,11 +559,18 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         self.activeTranscriptionSession = activeTranscriptionSession
         print("🎙️ BuddyDictationManager: provider ready, starting audio engine")
 
+        // Create a fresh AVAudioEngine each session so the inputNode picks up the
+        // current hardware sample rate. Supertonic TTS plays at 24kHz through its
+        // own engine, which can cause macOS to switch the hardware input rate from
+        // 48kHz to 24kHz. A long-lived engine caches the old format internally and
+        // installTap(format: nil) resolves to the stale rate → format mismatch
+        // error -10868. A new engine has no cached state and reads the live rate.
+        audioEngine = AVAudioEngine()
+
         let inputNode = audioEngine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
 
         inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             self?.activeTranscriptionSession?.appendAudioBuffer(buffer)
             self?.updateAudioPowerLevel(from: buffer)
         }

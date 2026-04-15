@@ -5,18 +5,18 @@
 
 ## Overview
 
-macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via AssemblyAI streaming, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
+macOS companion app. Lives in both the macOS status bar and the Dock. Clicking the menu bar icon opens a custom floating panel with companion voice controls. Clicking the Dock icon opens the Clicky chat window — a multi-conversation text-chat UI with a sidebar for managing conversations. Each conversation has its own message history; voice exchanges go into the active conversation. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via AssemblyAI streaming, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
 
 All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in the app.
 
 ## Architecture
 
-- **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
+- **App Type**: Menu bar + Dock (`LSUIElement=false`). The status item opens the voice panel; the Dock icon opens the chat window.
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
 - **AI Chat**: Claude (Sonnet 4.6 default, Opus 4.6 optional) via Cloudflare Worker proxy with SSE streaming
-- **Speech-to-Text**: AssemblyAI real-time streaming (`u3-rt-pro` model) via websocket, with OpenAI and Apple Speech as fallbacks
-- **Text-to-Speech**: ElevenLabs (`eleven_flash_v2_5` model) via Cloudflare Worker proxy
+- **Speech-to-Text**: AssemblyAI real-time streaming (`u3-rt-pro` model) via websocket, with OpenAI, Apple Speech, and Parakeet (on-device, via FluidAudio/CoreML) as options. Selectable at runtime via the panel UI.
+- **Text-to-Speech**: ElevenLabs (`eleven_flash_v2_5` model) via Cloudflare Worker proxy, or Supertonic (on-device ONNX, 66M params, ~167× realtime on Apple Silicon). Selectable at runtime via the panel UI.
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
 - **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
@@ -52,10 +52,18 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1026 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
+| `leanring_buddyApp.swift` | ~100 | App entry point. `CompanionAppDelegate` creates `MenuBarPanelManager`, `ChatWindowController`, and `CompanionManager`. Implements `applicationShouldHandleReopen` to open the chat window on Dock icon click. |
+| `ChatWindowController.swift` | ~65 | Manages the Clicky chat NSWindow. Created lazily on first dock-icon click; kept alive after closing so conversation persists across sessions. Hosts `ChatContainerView` (sidebar + chat). |
+| `ChatContainerView.swift` | ~100 | Root view for the chat window. NavigationSplitView with toggleable sidebar and detail column that swaps between ChatView and ChatSettingsView. Toolbar: sidebar toggle, new chat, model name, gear icon. |
+| `ConversationSidebarView.swift` | ~120 | Left sidebar listing all conversations. Shows title + relative timestamp per row, active state highlighting, and context menu for delete. |
+| `ChatSettingsView.swift` | ~310 | In-window settings page. Model picker, TTS/STT provider pickers, API key, LM Studio config. Dark DS-themed, shown when the gear toolbar icon is clicked. |
+| `ChatView.swift` | ~300 | SwiftUI chat window UI. Scrollable message list with user/assistant bubbles, streaming typing indicator, markdown rendering, and a text input bar. Observes `companionManager.chatMessages` for the active conversation. |
+| `ChatMessage.swift` | ~45 | Model for a single chat message. `role` (.user/.assistant), `content` (var for streaming), `timestamp`, `source` (.voice/.text). |
+| `Conversation.swift` | ~45 | Model for a conversation. `id`, `title` (auto-generated from first message), `createdAt`, `updatedAt`, `messageCount`. Used by the sidebar and ConversationStore. |
+| `ConversationStore.swift` | ~300 | Multi-conversation persistence. Stores each conversation's messages in a separate JSON file under `conversations/`, maintains a lightweight index for the sidebar, handles migration from the legacy single `history.json`, and manages screenshot compression/storage. |
+| `CompanionManager.swift` | ~1600 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, LM Studio API, ElevenLabs TTS, Supertonic TTS, overlay management, and multi-conversation state. Tracks voice state, conversation history, model selection, TTS/STT provider selection, active conversation, and `chatMessages`. Coordinates the push-to-talk → screenshot → LLM → TTS → pointing pipeline and the text-chat → LLM → streaming pipeline. Provides conversation switching, creation, and deletion for the sidebar. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
-| `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
+| `CompanionPanelView.swift` | ~1200 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus/LM Studio/Local), gear icon settings panel (API keys, LM Studio model dropdown, TTS/STT pickers), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
@@ -67,10 +75,15 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
 | `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
-| `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
+| `OpenAIAPI.swift` | ~245 | OpenAI-compatible vision API client. Non-streaming and streaming (SSE) modes. Used for LM Studio local models at 127.0.0.1:1234 and OpenAI cloud. |
 | `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
+| `SupertonicTTSClient.swift` | ~160 | On-device TTS client backed by Supertonic ONNX (66M params, ~167× realtime). Auto-downloads models from HuggingFace on first use. Mirrors `ElevenLabsTTSClient` interface. |
+| `SupertonicEngine.swift` | ~600 | ONNX inference engine for Supertonic. Vendored from supertone-inc/supertonic. Handles text preprocessing, chunking, duration prediction, latent diffusion denoising, and vocoder synthesis via ONNX Runtime. |
+| `ParakeetTranscriptionProvider.swift` | ~160 | On-device ASR provider using NVIDIA Parakeet via FluidAudio (CoreML/ANE). Implements `BuddyTranscriptionProvider` with the same buffer-then-transcribe pattern as the OpenAI provider. No API key required. |
+| `TextExtractor.swift` | ~290 | Extracts visible text from the frontmost app using two strategies: Accessibility API (primary, reads AXUIElement text + word bounds) and Vision OCR (fallback for Chrome/Electron). Used by the Apple Intelligence and LM Studio pipelines to give local models screen context without image encoding. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
+| `KeychainHelper.swift` | ~95 | Minimal Keychain wrapper for secure API key storage. Handles save/load/delete and one-time migration from UserDefaults. |
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
@@ -87,6 +100,15 @@ open leanring-buddy.xcodeproj
 # Known non-blocking warnings: Swift 6 concurrency warnings,
 # deprecated onChange warning in OverlayWindow.swift. Do NOT attempt to fix these.
 ```
+
+### Required Swift Packages (add via Xcode → File → Add Package Dependencies)
+
+| Package | URL | Purpose |
+|---------|-----|---------|
+| onnxruntime-swift-package-manager | `https://github.com/microsoft/onnxruntime-swift-package-manager.git` | ONNX Runtime for Supertonic on-device TTS |
+| FluidAudio | `https://github.com/FluidInference/FluidAudio.git` | Parakeet CoreML models for on-device ASR |
+
+After adding, link both products to the `leanring-buddy` target. Supertonic downloads ~200MB of ONNX model files from HuggingFace on first use. Parakeet downloads ~600MB of CoreML models on first use. Both are cached in `~/Library/Application Support/Clicky/models/`.
 
 **Do NOT run `xcodebuild` from the terminal** — it invalidates TCC (Transparency, Consent, and Control) permissions and the app will need to re-request screen recording, accessibility, etc.
 
