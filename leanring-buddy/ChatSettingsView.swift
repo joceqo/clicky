@@ -461,6 +461,7 @@ struct ChatSettingsView: View {
             modelSection
             voiceSection
             speechSection
+            voiceDisplaySection
             actionsSection
         }
     }
@@ -942,6 +943,21 @@ struct ChatSettingsView: View {
                 .tint(DS.Colors.accent)
                 .scaleEffect(0.8)
             }
+        }
+    }
+
+    // MARK: - Voice
+
+    private var voiceDisplaySection: some View {
+        settingsSection(title: "Voice Display") {
+            actionToggleRow(
+                label: "Show streaming text during voice",
+                hint: "Response appears as a bubble while Claude is generating — before TTS starts",
+                isOn: Binding(
+                    get: { companionManager.isVoiceStreamingTextEnabled },
+                    set: { companionManager.setVoiceStreamingTextEnabled($0) }
+                )
+            )
         }
     }
 

@@ -18,5 +18,7 @@
 	<string>Clicky uses speech recognition to transcribe your voice when you talk to it</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Clicky uses Apple Events to create notes in Apple Notes when you ask it to save something.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Clicky creates reminders in the Reminders app when you ask it to remind you of something.</string>
 </dict>
 </plist>

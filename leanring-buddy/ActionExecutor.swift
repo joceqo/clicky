@@ -8,11 +8,11 @@
 //  Supported actions:
 //    openURLOrApp     → NSWorkspace.open (URL) or NSWorkspace.openApplication
 //    runShortcut      → `shortcuts run "name"` via Process
-//    createReminder   → `shortcuts run "Clicky Create Reminder"` with input,
-//                       falling back to a plain Reminders AppleScript
+//    createReminder   → EventKit EKReminder with NSDataDetector date parsing
 //
 
 import AppKit
+import EventKit
 import Foundation
 
 enum ActionExecutor {
@@ -60,37 +60,65 @@ enum ActionExecutor {
 
     // MARK: - Create Reminder
 
-    /// Creates a macOS reminder via AppleScript.
-    /// `dateHint` is a human-readable string like "tomorrow 9am" — macOS Reminders
-    /// doesn't parse natural language directly, so we create it without a due date
-    /// and include the dateHint in the reminder body so the user sees it.
-    /// For full natural-language date support, build a Shortcut called
-    /// "Clicky Create Reminder" that accepts text input and uses the
-    /// "Ask Siri" date parsing available in Shortcuts.
-    static func createReminder(text: String, dateHint: String) {
-        let fullText = dateHint.isEmpty ? text : "\(text) (\(dateHint))"
+    /// Creates a macOS reminder via EventKit.
+    /// `dateHint` is a human-readable string like "tomorrow 9am" — NSDataDetector
+    /// parses it into a real Date so the reminder has an actual due date and alarm,
+    /// not just text in the title. Falls back to no due date if parsing fails.
+    static func createReminder(text: String, dateHint: String) async {
+        let store = EKEventStore()
 
-        let escapedText = fullText
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: " ")
-
-        let appleScriptSource = """
-        tell application "Reminders"
-            set newReminder to make new reminder with properties {name:"\(escapedText)"}
-        end tell
-        """
-
-        DispatchQueue.global(qos: .utility).async {
-            var errorInfo: NSDictionary?
-            guard let script = NSAppleScript(source: appleScriptSource) else { return }
-            script.executeAndReturnError(&errorInfo)
-            if let errorInfo {
-                print("⚠️ Reminder creation failed: \(errorInfo)")
-            } else {
-                print("⏰ Reminder created: \"\(fullText)\"")
+        // Request Reminders access — the system shows the permission dialog once,
+        // then caches the decision. macOS 14+ has a dedicated async method.
+        let accessGranted: Bool
+        if #available(macOS 14.0, *) {
+            accessGranted = (try? await store.requestFullAccessToReminders()) ?? false
+        } else {
+            accessGranted = await withCheckedContinuation { continuation in
+                store.requestAccess(to: .reminder) { granted, _ in
+                    continuation.resume(returning: granted)
+                }
             }
         }
+
+        guard accessGranted else {
+            print("⚠️ EventKit: Reminders access denied — cannot create reminder")
+            return
+        }
+
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = text
+        reminder.calendar = store.defaultCalendarForNewReminders()
+
+        // Try to parse the date hint into a real due date + alarm.
+        // NSDataDetector handles natural language like "tomorrow 9am", "next Friday",
+        // "in 2 hours", etc. The reminder body stays clean (just the title text).
+        if !dateHint.isEmpty, let parsedDueDate = parseDate(from: dateHint) {
+            let dueDateComponents = Calendar.current.dateComponents(
+                [.year, .month, .day, .hour, .minute],
+                from: parsedDueDate
+            )
+            reminder.dueDateComponents = dueDateComponents
+            reminder.addAlarm(EKAlarm(absoluteDate: parsedDueDate))
+            print("⏰ Reminder created via EventKit: \"\(text)\" due \(parsedDueDate)")
+        } else {
+            print("⏰ Reminder created via EventKit: \"\(text)\" (no parsed date for hint: \"\(dateHint)\")")
+        }
+
+        do {
+            try store.save(reminder, commit: true)
+        } catch {
+            print("⚠️ EventKit: reminder save failed — \(error)")
+        }
+    }
+
+    /// Uses NSDataDetector to extract a Date from a natural-language hint like
+    /// "tomorrow 9am" or "next Friday at 3pm". Returns nil if no date is found.
+    private static func parseDate(from hint: String) -> Date? {
+        guard let detector = try? NSDataDetector(
+            types: NSTextCheckingResult.CheckingType.date.rawValue
+        ) else { return nil }
+        let range = NSRange(hint.startIndex..., in: hint)
+        return detector.matches(in: hint, range: range).first?.date
     }
 
     // MARK: - Private helpers

@@ -65,6 +65,9 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
+    /// Floating panel that shows Claude's response text streaming in real-time
+    /// during voice interactions (when isVoiceStreamingTextEnabled is on).
+    let responseOverlayManager = CompanionResponseOverlayManager()
     /// Persists conversations and screenshots to Application Support.
     let conversationStore = ConversationStore()
     /// Persists the user's learning log to Application Support/Clicky/learning/log.json.
@@ -193,6 +196,21 @@ final class CompanionManager: ObservableObject {
     func setOCRExtractionEnabled(_ enabled: Bool) {
         isOCRExtractionEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "isOCRExtractionEnabled")
+    }
+
+    // MARK: - Voice streaming text
+
+    /// When enabled, Claude's response text streams into a floating bubble near the
+    /// cursor during voice interactions — the user sees the response being generated
+    /// live instead of staring at the spinner until TTS starts playing.
+    @Published var isVoiceStreamingTextEnabled: Bool = UserDefaults.standard.object(forKey: "isVoiceStreamingTextEnabled") as? Bool ?? true
+
+    func setVoiceStreamingTextEnabled(_ enabled: Bool) {
+        isVoiceStreamingTextEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isVoiceStreamingTextEnabled")
+        if !enabled {
+            responseOverlayManager.hideOverlay()
+        }
     }
 
     // MARK: - Action tag toggles
@@ -1388,8 +1406,14 @@ final class CompanionManager: ObservableObject {
         elevenLabsTTSClient.stopPlayback()
 
         currentResponseTask = Task {
-            // Stay in processing (spinner) state — no streaming text displayed
             voiceState = .processing
+
+            // Show the streaming text overlay if the setting is on.
+            // This lets the user read the response being generated while
+            // the spinner is still running — before TTS starts playing.
+            if isVoiceStreamingTextEnabled {
+                responseOverlayManager.showOverlayAndBeginStreaming()
+            }
 
             do {
                 let fullResponseText: String
@@ -1498,8 +1522,9 @@ final class CompanionManager: ObservableObject {
                         systemPrompt: companionVoiceResponseSystemPrompt,
                         conversationHistory: historyForAPI,
                         userPrompt: userPromptWithScreenContext,
-                        onTextChunk: { _ in
-                            // No streaming text display — spinner stays until TTS plays
+                        onTextChunk: { [weak self] accumulatedText in
+                            guard let self, self.isVoiceStreamingTextEnabled else { return }
+                            self.responseOverlayManager.updateStreamingText(accumulatedText)
                         }
                     )
                     let lmStudioElapsed = Date().timeIntervalSince(lmStudioStartTime)
@@ -1530,8 +1555,9 @@ final class CompanionManager: ObservableObject {
                         systemPrompt: companionVoiceResponseSystemPrompt,
                         conversationHistory: historyForAPI,
                         userPrompt: transcript,
-                        onTextChunk: { _ in
-                            // No streaming text display — spinner stays until TTS plays
+                        onTextChunk: { [weak self] accumulatedText in
+                            guard let self, self.isVoiceStreamingTextEnabled else { return }
+                            self.responseOverlayManager.updateStreamingText(accumulatedText)
                         }
                     )
                     fullResponseText = responseText
@@ -1689,6 +1715,14 @@ final class CompanionManager: ObservableObject {
 
                 ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 
+                // Transition the streaming text overlay: update it with the final
+                // clean text (tags stripped), then tell it to start its fade-out
+                // timer so it stays readable while TTS plays then disappears.
+                if isVoiceStreamingTextEnabled {
+                    responseOverlayManager.updateStreamingText(spokenText)
+                    responseOverlayManager.finishStreaming()
+                }
+
                 // Play the response via TTS. Keep the spinner (processing state)
                 // until the audio actually starts playing, then switch to responding.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1703,10 +1737,12 @@ final class CompanionManager: ObservableObject {
                     }
                 }
             } catch is CancellationError {
-                // User spoke again — response was interrupted
+                // User spoke again — response was interrupted, hide overlay immediately
+                responseOverlayManager.hideOverlay()
             } catch {
                 ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
+                responseOverlayManager.hideOverlay()
                 speakCreditsErrorFallback()
             }
 
@@ -2027,10 +2063,12 @@ final class CompanionManager: ObservableObject {
             }
         }
 
-        // Reminders via Reminders app AppleScript — only when the toggle is on
+        // Reminders via EventKit — async, runs in background, only when the toggle is on
         if isRemindActionEnabled {
             for reminder in actions.reminders {
-                ActionExecutor.createReminder(text: reminder.text, dateHint: reminder.dateHint)
+                Task {
+                    await ActionExecutor.createReminder(text: reminder.text, dateHint: reminder.dateHint)
+                }
             }
         }
     }
