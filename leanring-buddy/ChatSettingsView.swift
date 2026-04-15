@@ -11,6 +11,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Which tab is currently active in the settings view.
 private enum SettingsTab: String, CaseIterable {
@@ -38,6 +39,7 @@ struct ChatSettingsView: View {
     // Learning tab state
     @State private var learningEntries: [LearningEntry] = []
     @State private var learningDeleteConfirmID: UUID? = nil
+    @State private var exportStatus: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -271,9 +273,28 @@ struct ChatSettingsView: View {
                             }
                         }
 
-                        // Clear all
-                        HStack {
+                        // Clear all + Export row
+                        HStack(spacing: 8) {
+                            if !exportStatus.isEmpty {
+                                Text(exportStatus)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(DS.Colors.textTertiary)
+                            }
                             Spacer()
+                            Button(action: exportLearningLogAsMarkdown) {
+                                Text("Export .md")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(DS.Colors.textSecondary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                            .fill(Color.white.opacity(0.06))
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .pointerCursor()
+
                             Button(action: {
                                 companionManager.learningLogStore.clearAllEntries()
                                 learningEntries = []
@@ -296,6 +317,48 @@ struct ChatSettingsView: View {
                 }
             }
 
+            settingsSection(title: "Daily Review") {
+                VStack(alignment: .leading, spacing: 10) {
+                    settingsHint("Get a morning nudge with yesterday's topics and a prompt to quiz yourself. Claude generates the questions fresh — no pre-cooked flashcards.")
+
+                    HStack {
+                        Text("Daily review notification")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(DS.Colors.textSecondary)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { companionManager.isDailyReviewEnabled },
+                            set: { companionManager.setDailyReviewEnabled($0) }
+                        ))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .tint(DS.Colors.accent)
+                        .scaleEffect(0.8)
+                    }
+
+                    if companionManager.isDailyReviewEnabled {
+                        HStack {
+                            Text("Notify at")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(DS.Colors.textSecondary)
+                            Spacer()
+                            // Hour picker: 6am–10pm in readable labels
+                            Picker("", selection: Binding(
+                                get: { companionManager.dailyReviewHour },
+                                set: { companionManager.setDailyReviewHour($0) }
+                            )) {
+                                ForEach(reviewHourOptions, id: \.hour) { option in
+                                    Text(option.label).tag(option.hour)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .frame(width: 90)
+                        }
+                    }
+                }
+            }
+
             settingsSection(title: "Quiz") {
                 VStack(alignment: .leading, spacing: 8) {
                     settingsHint("Ask Clicky to quiz you on what you've learned. Type in the chat window:")
@@ -308,6 +371,43 @@ struct ChatSettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// Hour options shown in the daily review time picker. Range: 6am–10pm.
+    private var reviewHourOptions: [(hour: Int, label: String)] {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h a"
+        return (6...22).map { hour in
+            var components = DateComponents()
+            components.hour = hour
+            components.minute = 0
+            let date = Calendar.current.date(from: components) ?? Date()
+            return (hour: hour, label: formatter.string(from: date))
+        }
+    }
+
+    /// Opens an NSSavePanel and writes the learning log as a Markdown file.
+    private func exportLearningLogAsMarkdown() {
+        let savePanel = NSSavePanel()
+        savePanel.title = "Export Learning Log"
+        savePanel.nameFieldStringValue = "clicky-learning-log.md"
+        savePanel.allowedContentTypes = [.plainText]
+        savePanel.canCreateDirectories = true
+
+        guard savePanel.runModal() == .OK, let url = savePanel.url else { return }
+
+        let markdownContent = companionManager.learningLogStore.exportAsMarkdown()
+        do {
+            try markdownContent.write(to: url, atomically: true, encoding: .utf8)
+            exportStatus = "Exported"
+            // Clear the status after 3 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                exportStatus = ""
+            }
+        } catch {
+            exportStatus = "Export failed"
+            print("⚠️ Learning log export failed: \(error)")
         }
     }
 

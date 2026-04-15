@@ -69,6 +69,21 @@ final class CompanionManager: ObservableObject {
     let conversationStore = ConversationStore()
     /// Persists the user's learning log to Application Support/Clicky/learning/log.json.
     let learningLogStore = LearningLogStore()
+    /// Schedules and manages the daily learning review notification.
+    let dailyReviewScheduler = DailyReviewScheduler()
+
+    // MARK: - Frontmost app tracking
+
+    /// The name of the last non-Clicky app the user was working in.
+    /// Updated via an NSWorkspace notification observer so it's always
+    /// current by the time a voice or chat request is made.
+    /// Injected into the system prompt so Claude knows the user's context
+    /// without the user having to say "I'm in Xcode" every time.
+    private(set) var lastKnownFrontmostNonClickyAppName: String?
+
+    /// Token returned by addObserver — retained so the observation stays active
+    /// for the lifetime of CompanionManager.
+    private var frontmostAppObserverToken: Any?
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -213,6 +228,44 @@ final class CompanionManager: ObservableObject {
     func setRemindActionEnabled(_ enabled: Bool) {
         isRemindActionEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "isRemindActionEnabled")
+    }
+
+    // MARK: - Daily review notification settings
+
+    /// Whether the daily learning review notification is enabled.
+    @Published var isDailyReviewEnabled: Bool = UserDefaults.standard.object(forKey: "isDailyReviewEnabled") as? Bool ?? false
+
+    /// The hour of day (0–23) at which the daily review notification fires. Default: 9am.
+    @Published var dailyReviewHour: Int = UserDefaults.standard.object(forKey: "dailyReviewHour") as? Int ?? 9
+
+    func setDailyReviewEnabled(_ enabled: Bool) {
+        isDailyReviewEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isDailyReviewEnabled")
+        Task { await rescheduleDailyReviewNotification() }
+    }
+
+    func setDailyReviewHour(_ hour: Int) {
+        dailyReviewHour = hour
+        UserDefaults.standard.set(hour, forKey: "dailyReviewHour")
+        if isDailyReviewEnabled {
+            Task { await rescheduleDailyReviewNotification() }
+        }
+    }
+
+    /// Cancels any existing daily review notification and schedules a fresh
+    /// one if the feature is enabled and there are recent learning entries.
+    func rescheduleDailyReviewNotification() async {
+        guard isDailyReviewEnabled else {
+            dailyReviewScheduler.cancelDailyReview()
+            return
+        }
+        let permissionGranted = await dailyReviewScheduler.requestPermissionIfNeeded()
+        guard permissionGranted else {
+            print("⚠️ DailyReview: notification permission denied")
+            return
+        }
+        let recentEntries = learningLogStore.loadRecentEntries(withinDays: 1)
+        await dailyReviewScheduler.scheduleDailyReview(atHour: dailyReviewHour, recentTopics: recentEntries)
     }
 
     /// Queries LM Studio's local /v1/models endpoint and populates the model dropdown.
@@ -467,11 +520,24 @@ final class CompanionManager: ObservableObject {
         updatedProfile.save()
     }
 
-    /// Prepends the user profile block to a base system prompt when the profile
-    /// has any content. Returns the base prompt unchanged when the profile is empty.
-    private func buildSystemPromptWithUserProfile(_ baseSystemPrompt: String) -> String {
-        guard userProfile.hasAnyContent else { return baseSystemPrompt }
-        return userProfile.buildSystemPromptSection() + "\n" + baseSystemPrompt
+    /// Prepends the user profile block and current app context to a base system
+    /// prompt. Profile is omitted when empty. App context is omitted when unknown.
+    private func buildSystemPromptWithContext(_ baseSystemPrompt: String) -> String {
+        var prefixParts: [String] = []
+
+        if userProfile.hasAnyContent {
+            prefixParts.append(userProfile.buildSystemPromptSection())
+        }
+
+        // Inject which app the user is currently working in so Claude speaks
+        // the right language (Resolve terms, Xcode shortcuts, etc.) without
+        // the user having to mention the app in every message.
+        if let appName = lastKnownFrontmostNonClickyAppName {
+            prefixParts.append("current app: \(appName)")
+        }
+
+        guard !prefixParts.isEmpty else { return baseSystemPrompt }
+        return prefixParts.joined(separator: "\n") + "\n" + baseSystemPrompt
     }
 
     /// Whether the user has completed onboarding at least once. Persisted
@@ -554,6 +620,41 @@ final class CompanionManager: ObservableObject {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
+        }
+
+        startFrontmostAppTracking()
+
+        // Reschedule the daily review notification in the background so it
+        // fires at the right time on first launch and after the app restarts.
+        if isDailyReviewEnabled {
+            Task { await rescheduleDailyReviewNotification() }
+        }
+    }
+
+    /// Starts observing NSWorkspace application-activation notifications.
+    /// Whenever the user switches to a non-Clicky app, we store its name so
+    /// the system prompt can include "the user is currently working in X".
+    private func startFrontmostAppTracking() {
+        // Capture the current frontmost app immediately so the first voice
+        // request doesn't have nil context if the user hasn't switched apps yet.
+        let currentApp = NSWorkspace.shared.frontmostApplication
+        if currentApp?.bundleIdentifier != Bundle.main.bundleIdentifier {
+            lastKnownFrontmostNonClickyAppName = currentApp?.localizedName
+        }
+
+        // Observe future app switches. The block runs on .main so it's safe
+        // to update the stored name directly (CompanionManager is @MainActor).
+        frontmostAppObserverToken = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self else { return }
+            let activatedApp = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            // Only update when the activated app is not Clicky itself —
+            // we want to know what the user was working on, not that they opened Clicky.
+            guard activatedApp?.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+            self.lastKnownFrontmostNonClickyAppName = activatedApp?.localizedName
         }
     }
 
@@ -1114,10 +1215,10 @@ final class CompanionManager: ObservableObject {
     all action tags are stripped from what gets spoken — never mention them in your spoken response.
     """
 
-    /// Voice system prompt with the user profile prepended (if the profile has content).
-    /// This is the prompt actually sent to Claude for voice exchanges.
+    /// Voice system prompt with user profile + frontmost app context prepended.
+    /// Evaluated at call time so it always reflects the current app.
     private var companionVoiceResponseSystemPrompt: String {
-        buildSystemPromptWithUserProfile(Self.companionVoiceResponseBaseSystemPrompt)
+        buildSystemPromptWithContext(Self.companionVoiceResponseBaseSystemPrompt)
     }
 
     /// Base chat system prompt. User profile is prepended at call time via
@@ -1167,10 +1268,10 @@ final class CompanionManager: ObservableObject {
     all action tags are stripped automatically — never mention them in your response text.
     """
 
-    /// Chat system prompt with the user profile prepended (if the profile has content).
-    /// This is the prompt actually sent to Claude for text chat exchanges.
+    /// Chat system prompt with user profile + frontmost app context prepended.
+    /// Evaluated at call time so it always reflects the current app.
     private var companionChatSystemPrompt: String {
-        buildSystemPromptWithUserProfile(Self.companionChatBaseSystemPrompt)
+        buildSystemPromptWithContext(Self.companionChatBaseSystemPrompt)
     }
 
     // MARK: - Text Chat Pipeline

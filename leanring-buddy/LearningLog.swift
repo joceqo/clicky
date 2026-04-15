@@ -154,6 +154,51 @@ final class LearningLogStore {
 
         return "Learning log:\n" + lines.joined(separator: "\n")
     }
+
+    // MARK: - Markdown export
+
+    /// Exports the full learning log as a Markdown string, grouped by app
+    /// and sorted alphabetically. Suitable for dropping into an Obsidian
+    /// vault, Notion import, or any Markdown-aware notes app.
+    func exportAsMarkdown() -> String {
+        let allEntries = loadAllEntries()
+        guard !allEntries.isEmpty else {
+            return "# Clicky Learning Log\n\n*No entries yet.*\n"
+        }
+
+        let entryDateFormatter = DateFormatter()
+        entryDateFormatter.dateStyle = .medium
+        entryDateFormatter.timeStyle = .none
+
+        let exportDateFormatter = DateFormatter()
+        exportDateFormatter.dateStyle = .long
+        exportDateFormatter.timeStyle = .none
+
+        var lines: [String] = [
+            "# Clicky Learning Log",
+            "",
+            "*Exported \(exportDateFormatter.string(from: Date()))*",
+            "",
+        ]
+
+        // Group by app, sort apps alphabetically, entries within each app by date
+        let grouped = Dictionary(grouping: allEntries) { $0.app }
+        for app in grouped.keys.sorted() {
+            let sortedEntries = (grouped[app] ?? []).sorted { $0.date < $1.date }
+            lines.append("## \(app)")
+            lines.append("")
+            for entry in sortedEntries {
+                var entryLine = "- **\(entry.topic)** — \(entryDateFormatter.string(from: entry.date))"
+                if let noteTitle = entry.noteTitle {
+                    entryLine += " *(Note: \(noteTitle))*"
+                }
+                lines.append(entryLine)
+            }
+            lines.append("")
+        }
+
+        return lines.joined(separator: "\n")
+    }
 }
 
 // MARK: - Collection helper
