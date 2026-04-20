@@ -53,9 +53,9 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1100 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, Supertonic TTS, and overlay management. Tracks voice state, conversation history, model selection, TTS provider selection, and STT provider selection. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
+| `CompanionManager.swift` | ~1360 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, LM Studio API, ElevenLabs TTS, Supertonic TTS, and overlay management. Tracks voice state, conversation history, model selection (Sonnet/Opus/LM Studio/Local), TTS provider selection, and STT provider selection. Coordinates the full push-to-talk → screenshot → LLM → TTS → pointing pipeline. Routes between Claude (cloud), LM Studio (local vision), and Apple Intelligence (local text-only). |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
-| `CompanionPanelView.swift` | ~870 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), voice picker (ElevenLabs/Supertonic), speech picker (AssemblyAI/Parakeet), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
+| `CompanionPanelView.swift` | ~1200 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus/LM Studio/Local), gear icon settings panel (API keys, LM Studio model dropdown, TTS/STT pickers), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
@@ -67,7 +67,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
 | `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
-| `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
+| `OpenAIAPI.swift` | ~245 | OpenAI-compatible vision API client. Non-streaming and streaming (SSE) modes. Used for LM Studio local models at 127.0.0.1:1234 and OpenAI cloud. |
 | `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
 | `SupertonicTTSClient.swift` | ~160 | On-device TTS client backed by Supertonic ONNX (66M params, ~167× realtime). Auto-downloads models from HuggingFace on first use. Mirrors `ElevenLabsTTSClient` interface. |
 | `SupertonicEngine.swift` | ~600 | ONNX inference engine for Supertonic. Vendored from supertone-inc/supertonic. Handles text preprocessing, chunking, duration prediction, latent diffusion denoising, and vocoder synthesis via ONNX Runtime. |
