@@ -306,7 +306,11 @@ final class KokoroTTSClient {
         guard buffersScheduled > 0, activePlaybackSession == session else {
             isPlaying = false
             tearDownAudioEngine()
-            MLX.GPU.clearCache()
+            // Reclaim GPU cache off the main actor — clearCache() triggers a
+            // Metal GC pass that can take 50-200ms under memory pressure. Keeping
+            // it on the main actor at this point would stall the run loop and
+            // block any queued asyncAfter word-timing callbacks from firing.
+            Task.detached(priority: .background) { MLX.GPU.clearCache() }
             throw KokoroClientError.noAudioGenerated
         }
 
@@ -320,14 +324,22 @@ final class KokoroTTSClient {
                         if self.activePlaybackSession == session {
                             self.isPlaying = false
                             self.tearDownAudioEngine()
-                            // Reclaim the MLX GPU-buffer cache built up during
-                            // this utterance. Without this, the cache grows on
-                            // every read-aloud and the process RSS balloons
-                            // into the tens of GB over a session.
-                            MLX.GPU.clearCache()
-                            // Fire a final "nil" word so the overlay clears.
+                            // Clear the overlay immediately — the nil callback
+                            // updates UI and must not wait for GPU cleanup.
                             self.currentWordTimingCallback?(nil)
                             self.currentWordTimingCallback = nil
+                            // GPU cache reclaim off the main actor. clearCache()
+                            // triggers a Metal GC pass that can take 50-200ms
+                            // under memory pressure. Running it here (on @MainActor)
+                            // used to stall the run loop at exactly the moment
+                            // pending asyncAfter word-timing callbacks needed to
+                            // fire, causing the highlight to skip words and HALC
+                            // to log deadline misses. The detached task is safe
+                            // because clearCache() only reclaims inactive buffers
+                            // — any new inference that starts before this task
+                            // runs will have allocated fresh active tensors that
+                            // clearCache() will not touch.
+                            Task.detached(priority: .background) { MLX.GPU.clearCache() }
                         }
                         continuation.resume()
                     }
@@ -382,11 +394,18 @@ final class KokoroTTSClient {
         activePlaybackSession = nil
         tearDownAudioEngine()
         isPlaying = false
-        MLX.GPU.clearCache()
+        // Notify the overlay immediately — the nil callback is a UI update
+        // and must not wait for the GPU cleanup below.
         if let callback = currentWordTimingCallback {
             callback(nil)
         }
         currentWordTimingCallback = nil
+        // Same off-main pattern as the sentinel completion: clearCache() can
+        // stall for 50-200ms and must not run on @MainActor. clearCache() only
+        // reclaims inactive (cached) GPU buffers, so a new inference that starts
+        // before this task runs is unaffected — its tensors are "active" and
+        // invisible to the GC pass.
+        Task.detached(priority: .background) { MLX.GPU.clearCache() }
     }
 
     // MARK: - Sentence chunking
