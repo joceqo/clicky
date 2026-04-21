@@ -332,7 +332,11 @@ final class CompanionManager: ObservableObject {
     /// Where read-aloud starts from:
     /// - "frontmostFromTop": speak the full extracted text from the beginning.
     /// - "fromCursorPoint": find the word nearest the cursor and start there.
-    @Published var readAloudReadMode: String = UserDefaults.standard.string(forKey: "readAloudReadMode") ?? "frontmostFromTop"
+    /// Default is cursor-anchored because the overwhelming value of the ⌥⌘R
+    /// shortcut is "read this spot right now" — starting from the top of a
+    /// long page means the user has to wait through irrelevant content to
+    /// reach what they're actually looking at.
+    @Published var readAloudReadMode: String = UserDefaults.standard.string(forKey: "readAloudReadMode") ?? "fromCursorPoint"
 
     func setReadAloudReadMode(_ mode: String) {
         readAloudReadMode = mode
@@ -950,8 +954,19 @@ final class CompanionManager: ObservableObject {
     /// Creates a new empty conversation, prepends it to the sidebar list,
     /// and makes it active.
     func createNewConversation() {
-        // Save current conversation before switching away
-        saveActiveConversationToDisk()
+        // Evict the current conversation if it has zero messages — an empty
+        // conversation has no value, and leaving it in the index means it
+        // piles up over the session. This matters most during read-aloud:
+        // when a read-aloud's own conversation errors and gets deleted, the
+        // deleteConversation fallback switches back to the previously-active
+        // (often startup-created) empty. Without this eviction, every
+        // subsequent read-aloud saves that empty again → it lives forever.
+        if let activeID = activeConversationID, chatMessages.isEmpty {
+            conversationStore.deleteConversation(id: activeID)
+            conversations.removeAll { $0.id == activeID }
+        } else {
+            saveActiveConversationToDisk()
+        }
 
         let newConversation = conversationStore.createConversation()
         conversations.insert(newConversation, at: 0)
@@ -2069,10 +2084,14 @@ final class CompanionManager: ObservableObject {
     /// reserved for ⌃⇧L read-aloud because it's the only backend we drive
     /// with per-word highlight timings.
     private func speakTextWithActiveTTSProvider(_ text: String) async throws {
+        let cleanedText = TTSTextCleaner.cleanForSpeech(text)
+        // If cleaning stripped everything (pure code block, empty markdown),
+        // skip synthesis rather than sending an empty string to the API.
+        guard !cleanedText.isEmpty else { return }
         if selectedTTSProvider == "supertonic" {
-            try await supertonicTTSClient.speakText(text)
+            try await supertonicTTSClient.speakText(cleanedText)
         } else {
-            try await elevenLabsTTSClient.speakText(text)
+            try await elevenLabsTTSClient.speakText(cleanedText)
         }
     }
 
@@ -2087,6 +2106,22 @@ final class CompanionManager: ObservableObject {
         kokoroTTSClient.stopPlayback()
         readAloudHighlightOverlayManager.hide()
         readAloudTextPopoverOverlayManager.hide()
+    }
+
+    /// Speaks `text` using whichever chat-TTS provider is currently
+    /// selected. Entry point for external callers — the Claude Code Stop
+    /// hook uses this via the `clicky://` URL scheme. Runs the same
+    /// markdown/code cleanup as chat responses.
+    func speakExternalText(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task { @MainActor in
+            do {
+                try await speakTextWithActiveTTSProvider(trimmed)
+            } catch {
+                print("⚠️ Clicky: external TTS failed: \(error)")
+            }
+        }
     }
 
     /// True if any TTS backend (chat or read-aloud) has audio playing.
@@ -2164,7 +2199,7 @@ final class CompanionManager: ObservableObject {
         // full pipeline: TextExtraction → CursorSlice → Synthesis → FirstAudio.
         let signpostID = readAloudSignposter.makeSignpostID()
         readAloudSignposter.emitEvent("Trigger", id: signpostID,
-            "cursor=(%.0f,%.0f)", readTriggerCursorPoint.x, readTriggerCursorPoint.y)
+            "cursor=(\(String(format: "%.0f", readTriggerCursorPoint.x)),\(String(format: "%.0f", readTriggerCursorPoint.y)))")
 
         readAloudCurrentTask = Task { [weak self] in
             guard let self else { return }
@@ -2181,7 +2216,11 @@ final class CompanionManager: ObservableObject {
 
             do {
                 let extractionIntervalState = readAloudSignposter.beginInterval("TextExtraction", id: signpostID)
-                let extractionResult = try await self.readAloudTextExtractor.extract()
+                // Pass the trigger cursor point so OCR fallback picks the
+                // real window the user was looking at — skipping Clicky's
+                // own windows and screen-wide helper overlays (layer > 150 +
+                // ≥90% coverage).
+                let extractionResult = try await self.readAloudTextExtractor.extract(underCursor: readTriggerCursorPoint)
                 let extractionDurationSeconds = Date().timeIntervalSince(readTriggerTimestamp)
                 let wordsWithNonZeroBounds = extractionResult.words.filter { $0.screenBounds != .zero }.count
                 readAloudSignposter.endInterval("TextExtraction", extractionIntervalState,
@@ -2189,6 +2228,7 @@ final class CompanionManager: ObservableObject {
                 readAloudLogger.info("extraction: source=\(String(describing: extractionResult.source), privacy: .public) words=\(extractionResult.words.count, privacy: .public) withBounds=\(wordsWithNonZeroBounds, privacy: .public) durationS=\(String(format: "%.2f", extractionDurationSeconds), privacy: .public)")
 
                 if Task.isCancelled {
+                    self.deleteReadAloudConversationIfEmpty(conversationID: conversationIDForSave)
                     if self.activeReadAloudToken == sessionToken {
                         self.readAloudCurrentTask = nil
                         self.isReadAloudPlaying = false
@@ -2206,7 +2246,7 @@ final class CompanionManager: ObservableObject {
                 if self.readAloudReadMode == "fromCursorPoint",
                    !extractionResult.words.contains(where: { $0.screenBounds != .zero }) {
                     readAloudSignposter.emitEvent("FocusedCropFallback", id: signpostID,
-                        "cursor=(%.0f,%.0f)", readTriggerCursorPoint.x, readTriggerCursorPoint.y)
+                        "cursor=(\(String(format: "%.0f", readTriggerCursorPoint.x)),\(String(format: "%.0f", readTriggerCursorPoint.y)))")
                     readAloudLogger.info("fromCursorPoint: full extraction has no usable bounds — trying focused crop OCR")
                     let cropIntervalState = readAloudSignposter.beginInterval("FocusedCropOCR", id: signpostID)
                     if let cropResult = try? await self.readAloudTextExtractor.extractViaOCRAroundPoint(readTriggerCursorPoint),
@@ -2256,6 +2296,7 @@ final class CompanionManager: ObservableObject {
                 let textToSpeak = extractedTextResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !textToSpeak.isEmpty else {
                     readAloudLogger.notice("no text found in frontmost app after cursor slicing")
+                    self.deleteReadAloudConversationIfEmpty(conversationID: conversationIDForSave)
                     if self.activeReadAloudToken == sessionToken {
                         self.readAloudCurrentTask = nil
                         self.isReadAloudPlaying = false
@@ -2267,6 +2308,30 @@ final class CompanionManager: ObservableObject {
                 self.lastReadAloudDetectedLanguageCode = detectedLanguageCode
                 readAloudLogger.info("speaking \(textToSpeak.count, privacy: .public) chars via Kokoro (source: \(String(describing: extractionResult.source), privacy: .public))")
                 readAloudLogger.info("detected language: \(detectedLanguageCode, privacy: .public)")
+                // Foreground app + head/tail previews so OCR misreads
+                // ("lewer" for "Layer", stray UI chrome, etc.) are visible in
+                // the log without opening the saved message. Previews are
+                // single-line so they don't drown out the rest of the log.
+                let foregroundAppLabel = foregroundAppName ?? foregroundAppBundleID ?? "unknown"
+                let previewHead = Self.singleLinePreview(of: textToSpeak, maxLength: 160)
+                let previewTail: String = {
+                    guard textToSpeak.count > 160 else { return "" }
+                    let tailStartIndex = textToSpeak.index(textToSpeak.endIndex, offsetBy: -min(80, textToSpeak.count), limitedBy: textToSpeak.startIndex) ?? textToSpeak.startIndex
+                    return Self.singleLinePreview(of: String(textToSpeak[tailStartIndex...]), maxLength: 80)
+                }()
+                readAloudLogger.info("foreground app: \(foregroundAppLabel, privacy: .public)")
+                readAloudLogger.info("text head: \(previewHead, privacy: .public)")
+                if !previewTail.isEmpty {
+                    readAloudLogger.info("text tail: …\(previewTail, privacy: .public)")
+                }
+                // Also log the OCR-source full text once per session when
+                // extraction came from Vision OCR — the most common accuracy
+                // issue is OCR character-level misreads, and having the full
+                // text in the log makes it possible to diff against what was
+                // spoken to identify where Kokoro's normalizer ate something.
+                if extractionResult.source == .ocr {
+                    readAloudLogger.debug("ocr full text (\(extractionResult.fullText.count, privacy: .public) chars): \(Self.singleLinePreview(of: extractionResult.fullText, maxLength: 600), privacy: .public)")
+                }
                 if self.readAloudHighlightStyle == "popover" {
                     self.readAloudHighlightOverlayManager.hide()
                     self.readAloudTextPopoverOverlayManager.show(fullText: textToSpeak)
@@ -2304,9 +2369,16 @@ final class CompanionManager: ObservableObject {
                 // screen bounding box without racing against a newer extraction.
                 let wordsOnScreen = extractedTextResult.words
 
+                // Kokoro (Misaki) pronounces emoji code points as spoken words
+                // (e.g. "X-notation" for ❌). Replace each emoji scalar with
+                // spaces that match its UTF-16 length so Kokoro's returned
+                // `characterRange` values still align with `wordsOnScreen`
+                // ranges — which were computed against the original text and
+                // are used by the highlight follow-along.
+                let textForSynthesis = Self.neutralizeEmojiForTTS(in: textToSpeak)
                 let synthesisIntervalState = readAloudSignposter.beginInterval("KokoroSynthesis", id: signpostID,
-                    "chars=\(textToSpeak.count)")
-                let captureResult = try await self.kokoroTTSClient.speakTextWithWordTimings(textToSpeak) { [weak self] wordTiming in
+                    "chars=\(textForSynthesis.count)")
+                let captureResult = try await self.kokoroTTSClient.speakTextWithWordTimings(textForSynthesis) { [weak self] wordTiming in
                     guard let self else { return }
                     self.handleReadAloudWordStarted(wordTiming, wordsOnScreen: wordsOnScreen)
                 }
@@ -2373,17 +2445,24 @@ final class CompanionManager: ObservableObject {
                     }
                 }
             } catch is CancellationError {
-                // User tapped the shortcut again mid-flight; this is expected.
+                // User tapped the shortcut again mid-flight; this is a stop,
+                // not a failure. Keep the text message in the conversation so
+                // the user can still find what they were reading (demoted to
+                // plain text so the UI doesn't stay on "Capturing audio…").
                 // The shared model download keeps running in the background so
                 // the next press lands on a warm cache.
-                readAloudLogger.info("cancelled (download continues in background if still in progress)")
-                self.removeUncapturedReadAloudPlaceholder(messageID: readAloudMessageID)
+                readAloudLogger.info("stopped by user (download continues in background if still in progress)")
+                self.preserveStoppedReadAloudPlaceholder(messageID: readAloudMessageID, conversationID: conversationIDForSave)
             } catch let nsError as NSError where nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
-                readAloudLogger.info("cancelled (download continues in background if still in progress)")
-                self.removeUncapturedReadAloudPlaceholder(messageID: readAloudMessageID)
+                // URLSession-level cancellation also originates from a user stop.
+                readAloudLogger.info("stopped by user (download continues in background if still in progress)")
+                self.preserveStoppedReadAloudPlaceholder(messageID: readAloudMessageID, conversationID: conversationIDForSave)
             } catch {
+                // Genuine pipeline failure — discard the placeholder and the
+                // read-aloud-only conversation so the sidebar doesn't leak an
+                // empty entry the user can't play back.
                 readAloudLogger.error("error: \(String(describing: error), privacy: .public)")
-                self.removeUncapturedReadAloudPlaceholder(messageID: readAloudMessageID)
+                self.discardReadAloudOnError(messageID: readAloudMessageID, conversationID: conversationIDForSave)
             }
             self.readAloudHighlightOverlayManager.hide()
             self.readAloudTextPopoverOverlayManager.hide()
@@ -2400,15 +2479,90 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Removes a `.readAloud` placeholder that never got its capture filled
-    /// in (because the user cancelled or the download failed). Leaving the
-    /// placeholder in the conversation would stick the UI on "Capturing audio…"
-    /// forever with no replay-able content.
-    private func removeUncapturedReadAloudPlaceholder(messageID: UUID) {
-        guard let index = chatMessages.firstIndex(where: { $0.id == messageID }) else { return }
-        if chatMessages[index].readAloudCapture == nil {
+    /// Handles the "user stopped read-aloud before capture finished" path.
+    /// Keeps the read text as a plain-text message in the conversation so the
+    /// user can still find it in the sidebar, instead of leaving the UI stuck
+    /// on an empty "Capturing audio…" card or deleting their reading history.
+    /// Demotes `source` from `.readAloud` to `.text` because without a capture
+    /// there's nothing to replay — the read-aloud card would just disable
+    /// every control.
+    private func preserveStoppedReadAloudPlaceholder(messageID: UUID, conversationID: UUID?) {
+        if let index = chatMessages.firstIndex(where: { $0.id == messageID }),
+           chatMessages[index].readAloudCapture == nil {
+            chatMessages[index].source = .text
+            if let conversationID, conversationID == activeConversationID {
+                conversationStore.saveMessages(chatMessages, for: conversationID)
+                updateConversationMetadata(for: conversationID)
+            }
+        } else {
+            // Stop arrived before the placeholder was appended (e.g. during
+            // text extraction). Nothing to keep — just clean up the empty
+            // conversation so the sidebar doesn't leak an entry.
+            deleteReadAloudConversationIfEmpty(conversationID: conversationID)
+        }
+    }
+
+    /// Handles genuine pipeline failures (noAudioGenerated, model download
+    /// failure, etc.). Removes any uncaptured placeholder and deletes the
+    /// empty read-aloud conversation so the sidebar doesn't accumulate
+    /// unusable entries the user can't play back.
+    private func discardReadAloudOnError(messageID: UUID, conversationID: UUID?) {
+        if let index = chatMessages.firstIndex(where: { $0.id == messageID }),
+           chatMessages[index].readAloudCapture == nil {
             chatMessages.remove(at: index)
         }
+        deleteReadAloudConversationIfEmpty(conversationID: conversationID)
+    }
+
+    /// Deletes the conversation created at read-aloud trigger-time if it ended
+    /// up with no visible messages (e.g. the pipeline errored out before the
+    /// placeholder could be captured). Without this, every failed read-aloud
+    /// leaks an empty conversation into the sidebar.
+    private func deleteReadAloudConversationIfEmpty(conversationID: UUID?) {
+        guard let conversationID else { return }
+        guard conversationID == activeConversationID else { return }
+        guard chatMessages.isEmpty else { return }
+        deleteConversation(conversationID)
+    }
+
+    /// Collapses newlines/tabs/repeated whitespace and truncates to a length
+    /// bound so a multi-line block of OCR text fits on a single log line.
+    /// Used for the read-aloud telemetry previews — logs are easier to scan
+    /// when each entry is one row, and the truncation also keeps large
+    /// extractions from dominating the log buffer.
+    private static func singleLinePreview(of text: String, maxLength: Int) -> String {
+        let collapsed = text
+            .replacingOccurrences(of: "\n", with: " ⏎ ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
+        if collapsed.count <= maxLength { return collapsed }
+        let cutoffIndex = collapsed.index(collapsed.startIndex, offsetBy: maxLength)
+        return String(collapsed[..<cutoffIndex]) + "…"
+    }
+
+    /// Returns `text` with every emoji scalar replaced by an equal-length run
+    /// of ASCII spaces (UTF-16 length preserved). Kokoro's Misaki normalizer
+    /// tries to pronounce emoji code points aloud (producing noises like
+    /// "X-notation" for ❌); swapping them for spaces keeps synthesis silent
+    /// on those characters while leaving every downstream NSRange index still
+    /// valid against the original text.
+    private static func neutralizeEmojiForTTS(in text: String) -> String {
+        var output = ""
+        output.reserveCapacity(text.utf16.count)
+        for scalar in text.unicodeScalars {
+            let isEmojiScalar = scalar.properties.isEmojiPresentation
+                || scalar.properties.isEmojiModifier
+                || scalar.value == 0xFE0F   // variation selector-16 (makes preceding glyph emoji-style)
+                || scalar.value == 0x200D   // zero-width joiner (chains emoji into sequences)
+            if isEmojiScalar {
+                // One space per UTF-16 code unit: BMP scalars = 1 unit, astral = 2.
+                output.append(String(repeating: " ", count: scalar.utf16.count))
+            } else {
+                output.unicodeScalars.append(scalar)
+            }
+        }
+        return output
     }
 
     /// Unions the screen bounding boxes of every ExtractedWordInfo that
@@ -2483,17 +2637,41 @@ final class CompanionManager: ObservableObject {
         var readStartLocation = nearestWordStartLocation
 
         if nearestWordStartLocation > 0 {
-            let searchRangeBeforeNearestWord = NSRange(location: 0, length: nearestWordStartLocation)
-            let previousLineBreakRange = fullTextNSString.range(
-                of: "\n",
-                options: .backwards,
-                range: searchRangeBeforeNearestWord
-            )
-            if previousLineBreakRange.location != NSNotFound {
-                readStartLocation = previousLineBreakRange.location + previousLineBreakRange.length
-            } else {
-                readStartLocation = 0
+            // Back up to the nearest sentence-or-paragraph boundary rather
+            // than the nearest `\n`. Vision OCR emits one observation per
+            // visual line, so anchoring to the previous `\n` would chop a
+            // wrapped sentence — e.g. "Mid-session empty-conversation leak
+            // fixed (CompanionManager.swift:958-969) — evicts…" wrapping to
+            // a second visual line would have its second half read in
+            // isolation, swallowing the first half.
+            //
+            // We look for the LATEST (closest to cursor) of:
+            //   - `\n\n`            → paragraph break (caps how far back we
+            //                         can ever go; different paragraphs are
+            //                         different contexts)
+            //   - `. ` / `! ` / `? ` / `.\n` / `!\n` / `?\n`
+            //                       → sentence terminators
+            // and start reading at the character right after whichever
+            // matched. If none matched, start at the top of the text.
+            let searchLimitLength = nearestWordStartLocation
+            let boundaryCandidates = [
+                "\n\n", ". ", "! ", "? ", ".\n", "!\n", "?\n"
+            ]
+            var latestBoundaryEnd = 0
+            for boundary in boundaryCandidates {
+                let searchRange = NSRange(location: 0, length: searchLimitLength)
+                let found = fullTextNSString.range(
+                    of: boundary,
+                    options: .backwards,
+                    range: searchRange
+                )
+                guard found.location != NSNotFound else { continue }
+                let endOfBoundary = found.location + found.length
+                if endOfBoundary > latestBoundaryEnd {
+                    latestBoundaryEnd = endOfBoundary
+                }
             }
+            readStartLocation = latestBoundaryEnd
         }
 
         let slicedText = fullTextNSString.substring(from: readStartLocation)

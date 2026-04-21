@@ -20,8 +20,10 @@
 //    while remaining sharp enough for review.
 //
 //  Retention policy:
-//    Conversations with no messages and updatedAt older than `maxRetentionDays`
-//    are deleted automatically when the index is loaded on app launch.
+//    Conversations with no messages are deleted automatically when the index
+//    is loaded on app launch (sidebar should never show blank "New Chat"
+//    entries from failed read-aloud sessions or abandoned "+" clicks).
+//    Conversations with at least one message are kept forever.
 //
 
 import CoreGraphics
@@ -32,10 +34,6 @@ import UniformTypeIdentifiers
 final class ConversationStore {
 
     // MARK: - Configuration
-
-    /// Number of days to keep empty conversations before pruning them.
-    /// Conversations with messages are never auto-deleted.
-    static let maxRetentionDays = 7
 
     /// Longest edge (pixels) of stored screenshots.
     static let screenshotMaxPixelDimension = 1280
@@ -130,10 +128,16 @@ final class ConversationStore {
 
     // MARK: - Conversations Index
 
-    /// Loads the conversations index from disk, pruning stale empty conversations.
-    /// Returns conversations sorted by most recently updated first.
+    /// Loads the conversations index from disk, pruning empty conversations
+    /// (and their orphaned message files) so the sidebar never accumulates
+    /// blank "New Chat" entries from failed read-aloud sessions, abandoned
+    /// "+" clicks, or similar leaks. Returns conversations sorted by most
+    /// recently updated first.
     func loadConversationsIndex() -> [Conversation] {
         guard let jsonData = try? Data(contentsOf: conversationsIndexFileURL) else {
+            // Index missing but message files may exist (a previous crash
+            // could have lost the index). Sweep any orphan JSON files too.
+            removeOrphanConversationFiles(keeping: [])
             return []
         }
 
@@ -142,32 +146,66 @@ final class ConversationStore {
 
         guard var conversations = try? decoder.decode([Conversation].self, from: jsonData) else {
             print("⚠️ ConversationStore: Failed to decode conversations index — starting fresh")
+            removeOrphanConversationFiles(keeping: [])
             return []
         }
 
-        // Prune empty conversations older than the retention window
-        let cutoffDate = Calendar.current.date(
-            byAdding: .day,
-            value: -Self.maxRetentionDays,
-            to: Date()
-        )!
-
+        // Prune every empty conversation regardless of age. An empty
+        // conversation has no user value, and the previous 7-day retention
+        // window meant recent leaks piled up in the sidebar indefinitely.
+        // The startup init in CompanionManager always creates a fresh empty
+        // conversation when none exists, so nothing downstream depends on
+        // finding a pre-existing empty here.
         let beforeCount = conversations.count
-        conversations.removeAll { conversation in
-            conversation.messageCount == 0 && conversation.updatedAt < cutoffDate
+        let emptyConversations = conversations.filter { $0.messageCount == 0 }
+        conversations.removeAll { $0.messageCount == 0 }
+
+        if !emptyConversations.isEmpty {
+            print("🗂️ ConversationStore: Pruned \(emptyConversations.count) empty conversation(s)")
+            for emptyConversation in emptyConversations {
+                let fileURL = conversationFileURL(for: emptyConversation.id)
+                try? FileManager.default.removeItem(at: fileURL)
+            }
+            if conversations.count < beforeCount {
+                saveConversationsIndex(conversations)
+            }
         }
 
-        if conversations.count < beforeCount {
-            let pruned = beforeCount - conversations.count
-            print("🗂️ ConversationStore: Pruned \(pruned) stale empty conversation(s)")
-            saveConversationsIndex(conversations)
-        }
+        // Sweep any JSON files on disk that aren't referenced by the index
+        // (e.g. a crash between createConversation() and saveConversationsIndex()).
+        let indexedIDs = Set(conversations.map { $0.id })
+        removeOrphanConversationFiles(keeping: indexedIDs)
 
         // Sort by most recent activity first
         conversations.sort { $0.updatedAt > $1.updatedAt }
 
         print("🗂️ ConversationStore: Loaded \(conversations.count) conversations")
         return conversations
+    }
+
+    /// Deletes any `<uuid>.json` file in the conversations directory whose
+    /// UUID isn't in `keeping`. Covers orphans left by a crash between
+    /// `createConversation()` (which writes the file) and
+    /// `saveConversationsIndex()` (which records it).
+    private func removeOrphanConversationFiles(keeping indexedIDs: Set<UUID>) {
+        guard let directoryContents = try? FileManager.default.contentsOfDirectory(
+            at: conversationsDirectoryURL,
+            includingPropertiesForKeys: nil
+        ) else {
+            return
+        }
+        var orphansRemoved = 0
+        for fileURL in directoryContents where fileURL.pathExtension == "json" {
+            let fileName = fileURL.deletingPathExtension().lastPathComponent
+            guard let fileUUID = UUID(uuidString: fileName) else { continue }
+            if !indexedIDs.contains(fileUUID) {
+                try? FileManager.default.removeItem(at: fileURL)
+                orphansRemoved += 1
+            }
+        }
+        if orphansRemoved > 0 {
+            print("🗂️ ConversationStore: Removed \(orphansRemoved) orphan conversation file(s)")
+        }
     }
 
     /// Writes the conversations index to disk.

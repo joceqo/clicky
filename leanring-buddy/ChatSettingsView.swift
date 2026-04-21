@@ -482,6 +482,7 @@ struct ChatSettingsView: View {
             voiceSection
             speechSection
             voiceDisplaySection
+            readingSection
             actionsSection
         }
     }
@@ -979,6 +980,111 @@ struct ChatSettingsView: View {
                 )
             )
         }
+    }
+
+    // MARK: - Reading (⌃⇧L read-aloud sub-settings)
+
+    /// In-window equivalent of the menu-bar panel's Reading section — the two
+    /// UIs must stay in parity so users don't have to remember which settings
+    /// live where. Controls: where read-aloud starts (top vs cursor), whether
+    /// a screenshot is captured for the chat replay card, and the on-screen
+    /// highlight style while speaking.
+    private var readingSection: some View {
+        settingsSection(title: "Reading (⌃⇧L)") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Read mode")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    Spacer()
+
+                    HStack(spacing: 0) {
+                        readAloudModeOptionButton(label: "From Top", modeID: "frontmostFromTop")
+                        readAloudModeOptionButton(label: "From Cursor", modeID: "fromCursorPoint")
+                    }
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                    )
+                }
+
+                HStack {
+                    Text("Capture screenshot on ⌃⇧L")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    Spacer()
+
+                    Toggle("", isOn: Binding(
+                        get: { companionManager.isReadAloudScreenshotCaptureEnabled },
+                        set: { companionManager.setReadAloudScreenshotCaptureEnabled($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .tint(DS.Colors.accent)
+                    .scaleEffect(0.8)
+                }
+
+                HStack {
+                    Text("Highlight style")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+
+                    Spacer()
+
+                    HStack(spacing: 0) {
+                        readAloudHighlightStyleOptionButton(label: "Highlight", styleID: "highlight")
+                        readAloudHighlightStyleOptionButton(label: "Underline", styleID: "underline")
+                        readAloudHighlightStyleOptionButton(label: "Popover", styleID: "popover")
+                    }
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                    )
+                }
+            }
+        }
+    }
+
+    private func readAloudModeOptionButton(label: String, modeID: String) -> some View {
+        let isSelected = companionManager.readAloudReadMode == modeID
+        return Button(action: {
+            companionManager.setReadAloudReadMode(modeID)
+        }) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(isSelected ? DS.Colors.accent.opacity(0.4) : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    private func readAloudHighlightStyleOptionButton(label: String, styleID: String) -> some View {
+        let isSelected = companionManager.readAloudHighlightStyle == styleID
+        return Button(action: {
+            companionManager.setReadAloudHighlightStyle(styleID)
+        }) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(isSelected ? DS.Colors.accent.opacity(0.4) : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
     }
 
     // MARK: - Actions

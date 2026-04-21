@@ -48,7 +48,17 @@ final class TextExtractor {
     // MARK: - Public API
 
     func extract() async throws -> ScreenTextExtractionResult {
-        // Try AX first — it's faster and doesn't require screen capture
+        try await extract(underCursor: nil)
+    }
+
+    /// Variant that biases the OCR fallback toward the real window under the
+    /// cursor — rejects Clicky's own windows, invisible windows, and
+    /// screen-wide helper/tracker overlays that park themselves at high
+    /// window layers. Callers with a known cursor point (e.g. ⌃⇧L read-aloud
+    /// trigger) should pass it so the picker can lock onto the window the
+    /// user is actually looking at, not just the frontmost PID's first
+    /// window.
+    func extract(underCursor cursorPoint: CGPoint?) async throws -> ScreenTextExtractionResult {
         if let axResult = try? extractViaAccessibility(), !axResult.words.isEmpty {
             // If every word has a zero bounding box, AX didn't give us real screen
             // positions (common in Chrome and Electron). Fall back to OCR so we at
@@ -58,8 +68,7 @@ final class TextExtractor {
                 return axResult
             }
         }
-        // Fallback: capture the screen and OCR it
-        return try await extractViaOCR()
+        return try await extractViaOCR(underCursor: cursorPoint)
     }
 
     // MARK: - Strategy A: Accessibility API
@@ -307,8 +316,9 @@ final class TextExtractor {
 
     // MARK: - Strategy B: Vision OCR
 
-    private func extractViaOCR() async throws -> ScreenTextExtractionResult {
-        let windowCapture = try getWindowCaptureInfo()
+    private func extractViaOCR(underCursor cursorPoint: CGPoint?) async throws -> ScreenTextExtractionResult {
+        let windowCapture = try getWindowCaptureInfo(underCursor: cursorPoint)
+        print("🔎 TextExtractor: OCR target window → owner=\(windowCapture.ownerName ?? "?") pid=\(windowCapture.ownerPID) layer=\(windowCapture.layer) bounds=\(windowCapture.bounds)")
         let capturedImage = try await captureWindowImage(windowCapture: windowCapture)
         let (fullText, words) = try runVisionOCR(on: capturedImage, windowBounds: windowCapture.bounds)
         return ScreenTextExtractionResult(fullText: fullText, words: words, source: .ocr)
@@ -317,25 +327,94 @@ final class TextExtractor {
     private struct WindowCaptureInfo {
         let bounds: CGRect        // Screen coords, AppKit convention (bottom-left origin)
         let windowID: CGWindowID
+        let ownerPID: pid_t
+        let ownerName: String?
+        let layer: Int
     }
 
-    /// Locate the frontmost application's main window using CGWindowListCopyWindowInfo.
-    private func getWindowCaptureInfo() throws -> WindowCaptureInfo {
-        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
-            throw TextExtractionError.noFrontmostApp
-        }
+    /// System windows that are full-screen or near-full-screen but have no
+    /// real content — picking them wastes an OCR pass and returns zero words.
+    /// Ported from SwiftGrab `WindowHitTester.blockedBundleIDs` so the two
+    /// projects stay in parity.
+    private static let blockedWindowBundleIDs: Set<String> = [
+        "com.apple.screencaptureui",   // macOS Screenshot tool overlay
+        "com.apple.WindowManager",     // Stage Manager scaffolding
+        "com.apple.dock",              // Dock, Mission Control host
+        "com.apple.controlcenter",     // Control Center chrome
+        "com.apple.notificationcenterui" // Notification Center overlay
+    ]
 
-        let frontmostPID = frontmostApp.processIdentifier
+    /// Owner-name level filter for processes whose bundle ID isn't
+    /// straightforward to look up (WindowServer owns the wallpaper/menu-bar
+    /// compositor windows and must never be OCR'd).
+    private static let blockedWindowOwnerNames: Set<String> = ["WindowServer"]
+
+    /// Picks the window to OCR by walking `CGWindowListCopyWindowInfo` in
+    /// front-to-back order. Strategy:
+    ///
+    ///   1. Skip our own process — otherwise the ⌃⇧L shortcut would happily
+    ///      OCR the Clicky panel the user just clicked through.
+    ///   2. Skip invisible windows (alpha ≤ 0.01).
+    ///   3. Skip screen-wide helper trackers — any window at layer > 150 that
+    ///      covers ≥ 90% of the screen. Automation assistants, screen
+    ///      recorders, and cursor-trackers park invisible full-screen windows
+    ///      up there that would otherwise swallow every hit-test.
+    ///   4. When a cursor point is provided, prefer the topmost window that
+    ///      contains it. This picks small legitimate overlays (Clicky-style
+    ///      popovers in other apps, notifications) over the app behind them,
+    ///      which matches "read what I'm looking at."
+    ///   5. Fallback: first window of `NSWorkspace.frontmostApplication`.
+    ///
+    /// Ported from SwiftGrab (`WindowHitTester.firstMatch`) — same layer +
+    /// coverage thresholds so the two projects stay in parity.
+    private func getWindowCaptureInfo(underCursor cursorPoint: CGPoint?) throws -> WindowCaptureInfo {
         let windowList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[CFString: Any]] ?? []
 
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let primaryScreenHeight = NSScreen.screens.first?.frame.height ?? 0
+        let screenSize = NSScreen.main?.frame.size ?? .zero
+
+        // Convert cursor from AppKit global (bottom-left origin) to Quartz
+        // (top-left origin) so it matches kCGWindowBounds' coordinate space.
+        let quartzCursorPoint: CGPoint? = cursorPoint.map { point in
+            CGPoint(x: point.x, y: primaryScreenHeight - point.y)
+        }
+
+        var cursorHitCandidate: WindowCaptureInfo?
+        // Instead of "first window of frontmost app" — which returns whatever
+        // is topmost in Z-order and can be a tooltip/popover sub-window —
+        // collect the *largest-area* window owned by the frontmost PID. For
+        // the overwhelmingly common case of "cursor over the real content",
+        // this is the main document window, not a transient popover.
+        var largestFrontmostAppCandidate: WindowCaptureInfo?
+        var largestFrontmostAppArea: CGFloat = 0
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+
         for windowDict in windowList {
             guard let ownerPID = windowDict[kCGWindowOwnerPID] as? Int32,
-                  ownerPID == frontmostPID,
-                  let boundsDict = windowDict[kCGWindowBounds] as? [String: CGFloat],
+                  ownerPID != ownPID else {
+                continue
+            }
+            guard let boundsDict = windowDict[kCGWindowBounds] as? [String: CGFloat],
                   let windowID = windowDict[kCGWindowNumber] as? CGWindowID else {
+                continue
+            }
+
+            let alpha = (windowDict[kCGWindowAlpha] as? NSNumber)?.doubleValue ?? 1.0
+            if alpha <= 0.01 { continue }
+
+            // Reject system overlays that own full-screen windows with no
+            // real content — otherwise they win the "largest-area" pick and
+            // the OCR pass returns zero words (expensive no-op). Common
+            // culprits: macOS Screenshot tool after ⌘⇧5, the Dock's
+            // Mission-Control backdrop, Stage Manager scaffolding.
+            let ownerName = windowDict[kCGWindowOwnerName] as? String
+            if let ownerName, Self.blockedWindowOwnerNames.contains(ownerName) { continue }
+            if let bundleID = NSRunningApplication(processIdentifier: ownerPID)?.bundleIdentifier,
+               Self.blockedWindowBundleIDs.contains(bundleID) {
                 continue
             }
 
@@ -343,18 +422,60 @@ final class TextExtractor {
             let windowY = boundsDict["Y"] ?? 0
             let windowWidth = boundsDict["Width"] ?? 0
             let windowHeight = boundsDict["Height"] ?? 0
+            let quartzBounds = CGRect(x: windowX, y: windowY, width: windowWidth, height: windowHeight)
 
-            // CGWindowList returns CG coordinates (top-left origin).
-            // Convert to AppKit (bottom-left origin) for the overlay system.
-            let primaryScreenHeight = NSScreen.screens.first?.frame.height ?? 0
+            let layer = (windowDict[kCGWindowLayer] as? NSNumber)?.intValue ?? 0
+            let coverage = screenSize.width > 0 && screenSize.height > 0
+                ? (windowWidth * windowHeight) / (screenSize.width * screenSize.height)
+                : 0
+            if layer > 150 && coverage > 0.9 { continue }
+
             let appKitY = primaryScreenHeight - windowY - windowHeight
-
-            return WindowCaptureInfo(
+            let candidate = WindowCaptureInfo(
                 bounds: CGRect(x: windowX, y: appKitY, width: windowWidth, height: windowHeight),
-                windowID: windowID
+                windowID: windowID,
+                ownerPID: ownerPID,
+                ownerName: ownerName,
+                layer: layer
             )
+
+            if let quartzCursorPoint, cursorHitCandidate == nil,
+               quartzBounds.contains(quartzCursorPoint) {
+                cursorHitCandidate = candidate
+            }
+            if let frontmostPID, ownerPID == frontmostPID {
+                let area = windowWidth * windowHeight
+                if area > largestFrontmostAppArea {
+                    largestFrontmostAppArea = area
+                    largestFrontmostAppCandidate = candidate
+                }
+            }
+            // If we have no cursor point to bias with and no frontmost hint,
+            // fall back to the first otherwise-acceptable window (front-most
+            // real window after filtering).
+            if cursorPoint == nil && largestFrontmostAppCandidate == nil && frontmostPID == nil {
+                return candidate
+            }
         }
 
+        // Priority:
+        //   1. If the cursor-hit window is from a DIFFERENT process than the
+        //      frontmost app, prefer it — that's a legitimate cross-app
+        //      overlay (notification, floating helper, another app peeking
+        //      through) and is what the user is actually looking at.
+        //   2. Otherwise prefer the frontmost app's own first window.
+        //      Same-PID hits tend to be tooltips, context menus, or small
+        //      popovers that would OCR to nearly nothing; the main window
+        //      has the content the user means to read.
+        //   3. As a last resort, accept whatever the cursor hit (no
+        //      frontmost hint available) or fail out.
+        if let cursorHitCandidate,
+           let largestFrontmostAppCandidate,
+           cursorHitCandidate.ownerPID != largestFrontmostAppCandidate.ownerPID {
+            return cursorHitCandidate
+        }
+        if let largestFrontmostAppCandidate { return largestFrontmostAppCandidate }
+        if let cursorHitCandidate { return cursorHitCandidate }
         throw TextExtractionError.noWindowFound
     }
 
@@ -449,7 +570,7 @@ final class TextExtractor {
                     // a plausible x-position for anchoring. Much better than .zero, which
                     // makes sliceReadAloudTextFromCursorPoint fall back to reading from the
                     // very first word in the document (top-left symptom).
-                    let estimatedBounds = estimateWordBoundsFromLineBoundingBox(
+                    let estimatedBounds = self.estimateWordBoundsFromLineBoundingBox(
                         wordRange: substringRange,
                         lineText: lineText,
                         lineNormalizedBoundingBox: lineObservationBoundingBox,

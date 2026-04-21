@@ -110,7 +110,12 @@ struct ChatMessage: Identifiable, Codable {
     let role: ChatMessageRole
     var content: String
     let timestamp: Date
-    let source: ChatMessageSource
+    /// `var` because a `.readAloud` placeholder can be demoted to `.text` when
+    /// the user stops playback before audio capture completes — the text is
+    /// still worth keeping in the conversation even without a replay-able
+    /// recording, and `.text` makes the chat UI render it as a plain message
+    /// instead of the "Capturing audio…" card stuck on an empty capture.
+    var source: ChatMessageSource
     /// The model that generated this response (e.g. "claude-sonnet-4-6", "lmstudio").
     /// `nil` for user messages. Stored so the chat UI can show which model answered
     /// and the conversation JSON serves as a complete debug log.
