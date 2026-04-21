@@ -16,8 +16,10 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     let shortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
     /// Fires once per ⌃M key-down. Used to cycle the active LLM model globally.
     let modelCyclePublisher = PassthroughSubject<Void, Never>()
-    /// Fires once per ⌥⌘R key-down. Used to toggle read-aloud of the frontmost
-    /// app's visible text. Tap-once semantics (no hold required).
+    /// Fires once per ⌃⇧L key-down. Used to toggle read-aloud of the frontmost
+    /// app's visible text. Tap-once semantics (no hold required). Picked to
+    /// avoid colliding with push-to-talk's ⌃⌥ modifier set and with the
+    /// ubiquitous ⌘R / ⌥⌘R / ⌘S app shortcuts.
     let readAloudTogglePublisher = PassthroughSubject<Void, Never>()
 
     private var globalEventTap: CFMachPort?
@@ -128,17 +130,20 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             return Unmanaged.passUnretained(event)
         }
 
-        // ⌥⌘R (keycode 15) — toggle read-aloud of the frontmost app on key-down only.
+        // ⌃⇧L (keycode 37) — toggle read-aloud of the frontmost app on key-down only.
         // Fires exactly once per press, independent of push-to-talk state.
-        let rKeyCode: UInt16 = 15
+        // Excludes ⌥ so the combo can never be confused with push-to-talk
+        // (⌃⌥ modifier-only), and excludes ⌘ so it won't collide with Save /
+        // Reload / Rename variants commonly bound to ⌘-combos across apps.
+        let lKeyCode: UInt16 = 37
         if eventType == .keyDown
-            && eventKeyCode == rKeyCode
-            && event.flags.contains(.maskCommand)
-            && event.flags.contains(.maskAlternate)
-            && !event.flags.contains(.maskControl)
-            && !event.flags.contains(.maskShift)
+            && eventKeyCode == lKeyCode
+            && event.flags.contains(.maskControl)
+            && event.flags.contains(.maskShift)
+            && !event.flags.contains(.maskAlternate)
+            && !event.flags.contains(.maskCommand)
         {
-            print("[ReadAloud] Global ⌥⌘R detected")
+            print("[ReadAloud] Global ⌃⇧L detected (modifiers=\(event.flags.rawValue), keyCode=\(eventKeyCode))")
             readAloudTogglePublisher.send()
             return Unmanaged.passUnretained(event)
         }

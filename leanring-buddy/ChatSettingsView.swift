@@ -26,6 +26,10 @@ struct ChatSettingsView: View {
     let onDismiss: () -> Void
 
     @State private var selectedTab: SettingsTab = .general
+    /// Collapsed by default so the Actions section doesn't dominate the
+    /// General tab — the 8+ toggles are power-user territory, not something
+    /// you need to see every time you open Settings.
+    @State private var isActionsSectionExpanded: Bool = false
 
     // General tab state
     @State private var apiKeyInput = ""
@@ -984,7 +988,14 @@ struct ChatSettingsView: View {
     /// corresponding executor — turning one off means the tag is still stripped
     /// from the response text, but the action is never performed.
     private var actionsSection: some View {
-        settingsSection(title: "Actions") {
+        collapsibleSettingsSection(
+            title: "Actions",
+            isExpanded: $isActionsSectionExpanded,
+            masterToggle: Binding(
+                get: { companionManager.isActionsMasterEnabled },
+                set: { companionManager.setActionsMasterEnabled($0) }
+            )
+        ) {
             VStack(spacing: 0) {
                 actionToggleRow(
                     label: "Track learning topics",
@@ -1065,7 +1076,7 @@ struct ChatSettingsView: View {
                     .padding(.vertical, 2)
 
                 actionToggleRow(
-                    label: "Read aloud (⌥⌘R)",
+                    label: "Read aloud (⌃⇧L)",
                     hint: "Reads the frontmost app's visible text via the selected TTS provider. Tap again to stop.",
                     isOn: Binding(
                         get: { companionManager.isReadAloudShortcutEnabled },
@@ -1167,6 +1178,68 @@ struct ChatSettingsView: View {
                 .foregroundColor(DS.Colors.textPrimary)
 
             content()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large)
+                .fill(DS.Colors.surface1)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+
+    /// Collapsible variant of `settingsSection` — the title row becomes a
+    /// disclosure button with a chevron, and an optional master toggle lets
+    /// the user turn the whole section off without expanding it. Content is
+    /// hidden (not just collapsed) when `isExpanded` is false so the section
+    /// genuinely takes less vertical space.
+    private func collapsibleSettingsSection<Content: View>(
+        title: String,
+        isExpanded: Binding<Bool>,
+        masterToggle: Binding<Bool>? = nil,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Button(action: {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        isExpanded.wrappedValue.toggle()
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(DS.Colors.textSecondary)
+                            .frame(width: 10)
+                        Text(title)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(DS.Colors.textPrimary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
+
+                Spacer()
+
+                if let masterToggle {
+                    Toggle("", isOn: masterToggle)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .tint(DS.Colors.accent)
+                        .scaleEffect(0.8)
+                }
+            }
+
+            if isExpanded.wrappedValue {
+                content()
+                    .opacity(masterToggle?.wrappedValue == false ? 0.45 : 1.0)
+                    .disabled(masterToggle?.wrappedValue == false)
+            }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)

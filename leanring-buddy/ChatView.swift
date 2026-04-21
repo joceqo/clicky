@@ -59,7 +59,8 @@ struct ChatView: View {
                     ForEach(companionManager.chatMessages) { message in
                         ChatMessageBubbleView(
                             message: message,
-                            conversationStore: companionManager.conversationStore
+                            conversationStore: companionManager.conversationStore,
+                            companionManager: companionManager
                         )
                     }
 
@@ -188,19 +189,29 @@ private struct SendButtonView: View {
 private struct ChatMessageBubbleView: View {
     let message: ChatMessage
     let conversationStore: ConversationStore
+    let companionManager: CompanionManager
     @State private var selectedScreenshotFileURL: URL? = nil
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 6) {
-            if message.role == .user {
-                Spacer(minLength: 60)
-                userBubble
-            } else {
-                assistantBubble
-                Spacer(minLength: 60)
+        if message.source == .readAloud {
+            ReadAloudMessageCardView(
+                message: message,
+                conversationStore: conversationStore,
+                companionManager: companionManager
+            )
+            .padding(.horizontal, 16)
+        } else {
+            HStack(alignment: .bottom, spacing: 6) {
+                if message.role == .user {
+                    Spacer(minLength: 60)
+                    userBubble
+                } else {
+                    assistantBubble
+                    Spacer(minLength: 60)
+                }
             }
+            .padding(.horizontal, 16)
         }
-        .padding(.horizontal, 16)
     }
 
     // MARK: User bubble
@@ -429,6 +440,253 @@ private struct ChatMessageBubbleView: View {
         } else {
             return String(format: "%.0fs", seconds)
         }
+    }
+
+    private var formattedTimestamp: String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter.string(from: message.timestamp)
+    }
+}
+
+// MARK: - Read-aloud Card
+
+/// Dedicated card shown for every ⌃⇧L read-aloud capture. Lays out a
+/// screenshot of what was read, the extracted text (collapsed by default),
+/// and a Replay button that replays the captured WAV while the highlight
+/// overlay re-animates over the live screen using the stored word timings.
+private struct ReadAloudMessageCardView: View {
+    let message: ChatMessage
+    let conversationStore: ConversationStore
+    let companionManager: CompanionManager
+
+    @State private var isTextExpanded: Bool = false
+    @State private var isHoveringPlay: Bool = false
+    @State private var isHoveringViewPopover: Bool = false
+    @State private var selectedScreenshotFileURL: URL? = nil
+
+    private let collapsedTextLineLimit: Int = 3
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            headerRow
+            if !message.screenshotFileNames.isEmpty {
+                screenshotStrip
+            }
+            extractedTextBlock
+            footerRow
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large)
+                .fill(DS.Colors.surface2)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.large)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 1)
+        )
+        .sheet(isPresented: isScreenshotDetailPresentedBinding) {
+            if let selectedScreenshotFileURL {
+                ScreenshotDetailView(fileURL: selectedScreenshotFileURL)
+            }
+        }
+    }
+
+    // MARK: Header
+
+    private var headerRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(DS.Colors.textSecondary)
+            Text(headerTitleText)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(DS.Colors.textSecondary)
+            if let bundleID = message.foregroundAppBundleID,
+               let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: appURL.path))
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
+            }
+            if let appName = message.foregroundAppName {
+                Text(appName)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Text(formattedTimestamp)
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary)
+        }
+    }
+
+    private var headerTitleText: String {
+        message.foregroundAppName != nil ? "Read aloud from" : "Read aloud"
+    }
+
+    // MARK: Screenshots
+
+    private var screenshotStrip: some View {
+        HStack(alignment: .top, spacing: 8) {
+            ForEach(message.screenshotFileNames, id: \.self) { fileName in
+                let screenshotFileURL = conversationStore.screenshotFileURL(fileName: fileName)
+                ScreenshotThumbnailView(
+                    fileURL: screenshotFileURL,
+                    onTapThumbnail: { selectedScreenshotFileURL = screenshotFileURL }
+                )
+            }
+        }
+    }
+
+    private var isScreenshotDetailPresentedBinding: Binding<Bool> {
+        Binding(
+            get: { selectedScreenshotFileURL != nil },
+            set: { if !$0 { selectedScreenshotFileURL = nil } }
+        )
+    }
+
+    // MARK: Text block
+
+    private var extractedTextBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(message.content)
+                .font(.system(size: 12))
+                .foregroundColor(DS.Colors.textPrimary)
+                .lineLimit(isTextExpanded ? nil : collapsedTextLineLimit)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Only offer expand/collapse when the text actually wraps past the
+            // collapsed line limit — short reads show their full content already.
+            if message.content.count > 200 || message.content.contains("\n") {
+                Button(action: { withAnimation { isTextExpanded.toggle() } }) {
+                    Text(isTextExpanded ? "Show less" : "Show more")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(DS.Colors.blue500)
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
+            }
+        }
+    }
+
+    // MARK: Footer (replay + metadata)
+
+    private var footerRow: some View {
+        HStack(spacing: 8) {
+            playAudioButton
+            if !message.screenshotFileNames.isEmpty {
+                viewPopoverButton
+            }
+            if let capture = message.readAloudCapture {
+                Text(formattedDurationText(capture.audioDurationSeconds))
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+                Text("· \(capture.wordTimings.count) words")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+            } else {
+                Text("Capturing audio…")
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+            Spacer()
+        }
+    }
+
+    /// Plays just the captured audio — no popover, no live highlight. For
+    /// the common "just read it to me again" case, or when the message has
+    /// no screenshot attached (capture preference was off).
+    private var playAudioButton: some View {
+        let isAudioOnlyPlayingThisMessage =
+            companionManager.isAudioOnlyReplayPlayingMessageID == message.id
+
+        return Button(action: {
+            guard message.readAloudCapture != nil else { return }
+            companionManager.toggleAudioOnlyReadAloudReplay(for: message)
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: isAudioOnlyPlayingThisMessage ? "stop.fill" : "play.fill")
+                    .font(.system(size: 10, weight: .bold))
+                Text(isAudioOnlyPlayingThisMessage ? "Stop" : "Play")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundColor(isAudioOnlyPlayingThisMessage ? Color.red : DS.Colors.textPrimary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule().fill(
+                    isAudioOnlyPlayingThisMessage
+                        ? Color.red.opacity(0.22)
+                        : (isHoveringPlay ? DS.Colors.blue500.opacity(0.3) : Color.white.opacity(0.06))
+                )
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(message.readAloudCapture == nil)
+        .opacity(message.readAloudCapture == nil ? 0.5 : 1.0)
+        .onHover { hovering in
+            isHoveringPlay = hovering
+            if hovering && message.readAloudCapture != nil {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+
+    /// Opens the full replay popover window: the captured screenshot with
+    /// the highlight animating over each spoken word in sync with audio.
+    /// Hidden when the message has no screenshot (capture was disabled).
+    private var viewPopoverButton: some View {
+        Button(action: {
+            guard message.readAloudCapture != nil else { return }
+            companionManager.openReadAloudReplayPopover(for: message)
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "rectangle.inset.filled.and.person.filled")
+                    .font(.system(size: 10, weight: .bold))
+                Text("View")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundColor(DS.Colors.textPrimary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule().fill(
+                    isHoveringViewPopover
+                        ? DS.Colors.blue500.opacity(0.3)
+                        : Color.white.opacity(0.06)
+                )
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(message.readAloudCapture == nil)
+        .opacity(message.readAloudCapture == nil ? 0.5 : 1.0)
+        .onHover { hovering in
+            isHoveringViewPopover = hovering
+            if hovering && message.readAloudCapture != nil {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+
+    // MARK: Formatters
+
+    private func formattedDurationText(_ seconds: Double) -> String {
+        if seconds < 60 {
+            return String(format: "%.1fs", seconds)
+        }
+        let minutes = Int(seconds / 60)
+        let remainderSeconds = Int(seconds.truncatingRemainder(dividingBy: 60))
+        return String(format: "%dm %ds", minutes, remainderSeconds)
     }
 
     private var formattedTimestamp: String {

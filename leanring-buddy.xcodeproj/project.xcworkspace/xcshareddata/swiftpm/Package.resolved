@@ -1,5 +1,5 @@
 {
-  "originHash" : "60242893ffe6ba88ab42024db09b777fa864568286fa0362f480b2d6b9ef09f8",
+  "originHash" : "8312467b7f823a7559097e853265267f1149dfb96b8c2cde128e4d062cd9eb42",
   "pins" : [
     {
       "identity" : "fluidaudio",
@@ -11,12 +11,48 @@
       }
     },
     {
+      "identity" : "kokoro-ios",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mlalma/kokoro-ios.git",
+      "state" : {
+        "revision" : "4d6d1d8ff8cd012014180c9cd4cf0151e7682354",
+        "version" : "1.0.11"
+      }
+    },
+    {
       "identity" : "mac-automation",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/joceqo/mac-automation.git",
       "state" : {
         "branch" : "main",
         "revision" : "d5cc2a82591ceaca01181e7055bda598d0052812"
+      }
+    },
+    {
+      "identity" : "misakiswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mlalma/MisakiSwift",
+      "state" : {
+        "revision" : "6835a1ce4a8854075c89f18ff75c74b13ef58e15",
+        "version" : "1.0.6"
+      }
+    },
+    {
+      "identity" : "mlx-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/ml-explore/mlx-swift",
+      "state" : {
+        "revision" : "f58bd2c2b3b84316da69182f436db4219aff30b9",
+        "version" : "0.30.2"
+      }
+    },
+    {
+      "identity" : "mlxutilslibrary",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mlalma/MLXUtilsLibrary.git",
+      "state" : {
+        "revision" : "41f6cfd5d68b65aa3c65a34efe3b71c371ed915b",
+        "version" : "0.0.6"
       }
     },
     {
@@ -56,12 +92,21 @@
       }
     },
     {
-      "identity" : "swift-grab",
+      "identity" : "swift-numerics",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/joceqo/swift-grab",
+      "location" : "https://github.com/apple/swift-numerics",
       "state" : {
-        "branch" : "main",
-        "revision" : "d0603a3d70e8fe3d2ecd99b1ba76810fb7592eb0"
+        "revision" : "0c0290ff6b24942dadb83a929ffaaa1481df04a2",
+        "version" : "1.1.1"
+      }
+    },
+    {
+      "identity" : "zipfoundation",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/weichsel/ZIPFoundation.git",
+      "state" : {
+        "revision" : "22787ffb59de99e5dc1fbfe80b19c97a904ad48d",
+        "version" : "0.9.20"
       }
     }
   ],

@@ -29,6 +29,14 @@ struct CompanionPanelView: View {
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
 
+            if companionManager.isReadAloudPlaying {
+                Spacer()
+                    .frame(height: 12)
+
+                readAloudInProgressCard
+                    .padding(.horizontal, 16)
+            }
+
             if companionManager.hasCompletedOnboarding {
                 if isShowingSettings {
                     settingsGearPanel
@@ -149,6 +157,50 @@ struct CompanionPanelView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
+    }
+
+    private var readAloudInProgressCard: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(DS.Colors.textSecondary)
+
+            Text("Reading in progress")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(DS.Colors.textPrimary)
+
+            Spacer()
+
+            Button(action: {
+                companionManager.stopReadAloud()
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Stop")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundColor(DS.Colors.textOnAccent)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule()
+                        .fill(DS.Colors.accent)
+                )
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
     }
 
     // MARK: - Permissions Copy
@@ -870,6 +922,17 @@ struct CompanionPanelView: View {
                     .tint(DS.Colors.accent)
                     .scaleEffect(0.8)
                 }
+
+                // MARK: Reading (⌃⇧L read-aloud shortcut)
+                //
+                // Two controls:
+                //   1. Capture screenshot — when on, ⌃⇧L also snapshots the
+                //      screen so the chat card has a thumbnail and the replay
+                //      popover can re-animate the highlight over the image.
+                //   2. Highlight style — whether the live + popover overlay
+                //      paints a filled rectangle (default) or a thin bottom
+                //      underline behind each spoken word.
+                readingSettingsSection
             }
             .padding(.vertical, 4)
             .onAppear {
@@ -879,6 +942,109 @@ struct CompanionPanelView: View {
                 companionManager.fetchAvailableLMStudioModels()
             }
         }
+    }
+
+    // MARK: - Reading (⌃⇧L)
+
+    /// Section with the read-aloud preferences: where reading starts, whether a screenshot
+    /// is taken on each trigger (enables the replay popover + chat thumbnail)
+    /// and the highlight visual style (filled rect or underline). Stylistically
+    /// mirrors the other panel sections — 11pt label, compact switch/picker.
+    private var readingSettingsSection: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text("Read mode")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                HStack(spacing: 0) {
+                    readingModeOptionButton(label: "From Top", modeID: "frontmostFromTop")
+                    readingModeOptionButton(label: "From Cursor", modeID: "fromCursorPoint")
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
+            }
+
+            HStack {
+                Text("Capture screenshot on ⌃⇧L")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                Toggle("", isOn: Binding(
+                    get: { companionManager.isReadAloudScreenshotCaptureEnabled },
+                    set: { companionManager.setReadAloudScreenshotCaptureEnabled($0) }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .tint(DS.Colors.accent)
+                .scaleEffect(0.8)
+            }
+
+            HStack {
+                Text("Highlight style")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                HStack(spacing: 0) {
+                    readingHighlightStyleOptionButton(label: "Highlight", styleID: "highlight")
+                    readingHighlightStyleOptionButton(label: "Underline", styleID: "underline")
+                    readingHighlightStyleOptionButton(label: "Popover", styleID: "popover")
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
+            }
+        }
+    }
+
+    /// Single segmented-button option for the Highlight style picker.
+    private func readingHighlightStyleOptionButton(label: String, styleID: String) -> some View {
+        let isSelected = companionManager.readAloudHighlightStyle == styleID
+        return Button(action: {
+            companionManager.setReadAloudHighlightStyle(styleID)
+        }) {
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(isSelected ? DS.Colors.accent.opacity(0.4) : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    private func readingModeOptionButton(label: String, modeID: String) -> some View {
+        let isSelected = companionManager.readAloudReadMode == modeID
+        return Button(action: {
+            companionManager.setReadAloudReadMode(modeID)
+        }) {
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(isSelected ? DS.Colors.accent.opacity(0.4) : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
     }
 
     // MARK: - API Key
