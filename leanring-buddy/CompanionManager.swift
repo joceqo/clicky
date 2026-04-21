@@ -11,9 +11,16 @@ import AVFoundation
 import Combine
 import Foundation
 import MacAutomation
+import NaturalLanguage
 import PostHog
 import ScreenCaptureKit
 import SwiftUI
+import os
+
+/// os_log Logger for the read-aloud pipeline. Dedicated category so the
+/// menu-bar / chat code stays on `print` until we decide to migrate it too —
+/// log show --predicate 'category == "ReadAloud"' surfaces only this path.
+private let readAloudLogger = Logger(subsystem: "com.clicky.leanring-buddy", category: "ReadAloud")
 
 enum CompanionVoiceState {
     case idle
@@ -132,6 +139,24 @@ final class CompanionManager: ObservableObject {
         return SupertonicTTSClient()
     }()
 
+    /// On-device neural TTS via Kokoro (MLX). The only provider that emits
+    /// per-word timestamps, so it's what powers the ⌃⇧L read-aloud
+    /// highlight overlay. Used as a regular speakText backend too when the
+    /// user selects "kokoro" in settings.
+    private lazy var kokoroTTSClient: KokoroTTSClient = {
+        return KokoroTTSClient()
+    }()
+
+    /// Overlay that renders the yellow highlight rectangle covering the word
+    /// currently being spoken during ⌃⇧L read-aloud. Driven by Kokoro's
+    /// per-word start_ts callbacks.
+    private lazy var readAloudHighlightOverlayManager: ReadAloudHighlightOverlayManager = {
+        return ReadAloudHighlightOverlayManager()
+    }()
+    private lazy var readAloudTextPopoverOverlayManager: ReadAloudTextPopoverOverlayManager = {
+        return ReadAloudTextPopoverOverlayManager()
+    }()
+
     /// On-device LLM client via Apple Intelligence (FoundationModels).
     /// Text-only, no vision. Requires macOS 26+.
     private lazy var apfelAPI: ApfelAPI = {
@@ -216,6 +241,18 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Action tag toggles
 
+    /// Master toggle for the entire Actions section. When off, NO action
+    /// tag is executed regardless of its individual toggle — the tags are
+    /// still stripped from the response so the user never sees them, but
+    /// LOG, OPEN, SHORTCUT, REMIND, MUSIC, CLICK, NOTE, Obsidian are all
+    /// suppressed in one flip. Default on to preserve existing behaviour.
+    @Published var isActionsMasterEnabled: Bool = UserDefaults.standard.object(forKey: "isActionsMasterEnabled") as? Bool ?? true
+
+    func setActionsMasterEnabled(_ enabled: Bool) {
+        isActionsMasterEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isActionsMasterEnabled")
+    }
+
     /// Whether Claude can silently log topics to the learning store via [LOG:] tags.
     /// Toggling off stops new entries from being written; existing entries are untouched.
     @Published var isLearningLogEnabled: Bool = UserDefaults.standard.object(forKey: "isLearningLogEnabled") as? Bool ?? true
@@ -259,7 +296,7 @@ final class CompanionManager: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "isClickActionEnabled")
     }
 
-    /// Whether the global ⌥⌘R shortcut reads the frontmost app's visible text
+    /// Whether the global ⌃⇧L shortcut reads the frontmost app's visible text
     /// aloud via the currently selected TTS provider. When off the shortcut is
     /// still detected but ignored — so users can reclaim the keys if they clash
     /// with another app.
@@ -268,6 +305,51 @@ final class CompanionManager: ObservableObject {
     func setReadAloudShortcutEnabled(_ enabled: Bool) {
         isReadAloudShortcutEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "isReadAloudShortcutEnabled")
+    }
+
+    /// True while a ⌃⇧L read-aloud is synthesizing or playing. Drives the
+    /// menu-bar status icon swap (triangle ↔ stop glyph) so the user can
+    /// abort the read from anywhere without having to find the keyboard
+    /// shortcut or re-open the companion panel.
+    @Published private(set) var isReadAloudPlaying: Bool = false
+
+    /// Whether ⌃⇧L captures a screenshot of the screen at trigger time.
+    /// When enabled, the chat card shows a thumbnail and the replay popover
+    /// can re-animate the highlight on the captured image. When disabled,
+    /// the card shows text only and replay is audio-only.
+    @Published var isReadAloudScreenshotCaptureEnabled: Bool = UserDefaults.standard.object(forKey: "isReadAloudScreenshotCaptureEnabled") as? Bool ?? true
+
+    func setReadAloudScreenshotCaptureEnabled(_ enabled: Bool) {
+        isReadAloudScreenshotCaptureEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isReadAloudScreenshotCaptureEnabled")
+    }
+
+    /// Where read-aloud starts from:
+    /// - "frontmostFromTop": speak the full extracted text from the beginning.
+    /// - "fromCursorPoint": find the word nearest the cursor and start there.
+    @Published var readAloudReadMode: String = UserDefaults.standard.string(forKey: "readAloudReadMode") ?? "frontmostFromTop"
+
+    func setReadAloudReadMode(_ mode: String) {
+        readAloudReadMode = mode
+        UserDefaults.standard.set(mode, forKey: "readAloudReadMode")
+    }
+
+    /// Dominant language code inferred from the latest read-aloud text
+    /// (for example: "en", "fr", "es", "und").
+    @Published private(set) var lastReadAloudDetectedLanguageCode: String = "und"
+
+    /// Visual style for the read-aloud highlight — a filled rectangle behind
+    /// the word (default), or a thin underline beneath it. Shared by the
+    /// live overlay and the popover replay so both match user preference.
+    @Published var readAloudHighlightStyle: String = UserDefaults.standard.string(forKey: "readAloudHighlightStyle") ?? "highlight"
+
+    func setReadAloudHighlightStyle(_ style: String) {
+        readAloudHighlightStyle = style
+        UserDefaults.standard.set(style, forKey: "readAloudHighlightStyle")
+        readAloudHighlightOverlayManager.setHighlightStyle(style)
+        if style != "popover" {
+            readAloudTextPopoverOverlayManager.hide()
+        }
     }
 
     /// Whether Claude can create notes in Apple Notes via [NOTE:] tags.
@@ -504,12 +586,21 @@ final class CompanionManager: ObservableObject {
     private var audioPowerCancellable: AnyCancellable?
 
     /// Extracts the frontmost app's visible text (AX API with Vision OCR fallback)
-    /// when the ⌥⌘R read-aloud shortcut is pressed.
+    /// when the ⌃⇧L read-aloud shortcut is pressed.
     private let readAloudTextExtractor = TextExtractor()
 
-    /// The in-flight read-aloud extract+speak task. Used so a second ⌥⌘R press
+    /// The in-flight read-aloud extract+speak task. Used so a second ⌃⇧L press
     /// cancels the first one instead of queueing another utterance.
     private var readAloudCurrentTask: Task<Void, Never>?
+
+    /// Identifies the currently-active read-aloud session. Stamped at the
+    /// start of `toggleReadAloudOfFrontmostApp` and cleared by `stopReadAloud`.
+    /// Lets a (cancelled) stale task's cleanup skip clobbering `isReadAloudPlaying`
+    /// / `readAloudCurrentTask` after the user has already started a *new*
+    /// read-aloud session. Without this guard, a rapid stop→start sequence
+    /// could leave the menu-bar icon stuck on the triangle even though a read
+    /// is playing.
+    private var activeReadAloudToken: UUID?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     /// Scheduled hide for transient cursor mode — cancelled if the user
@@ -737,10 +828,17 @@ final class CompanionManager: ObservableObject {
         conversationStore.migrateFromLegacyHistoryIfNeeded()
         conversations = conversationStore.loadConversationsIndex()
 
-        // Always start a fresh conversation on launch so voice/text exchanges
-        // don't pile into the previous session. Old conversations stay in the
-        // sidebar for reference.
-        createNewConversation()
+        // Reuse the most recent empty conversation if one already exists to
+        // avoid accumulating blank "New Chat" entries across launches.
+        if let mostRecentConversation = conversations.first,
+           mostRecentConversation.messageCount == 0 {
+            activeConversationID = mostRecentConversation.id
+            chatMessages = conversationStore.loadMessages(for: mostRecentConversation.id)
+            rebuildConversationHistoryFromChatMessages()
+        } else {
+            // Start a fresh conversation only when the latest one has content.
+            createNewConversation()
+        }
 
         refreshAllPermissions()
         print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
@@ -1955,7 +2053,10 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - TTS Provider Helpers
 
-    /// Routes a speak call to whichever TTS backend is currently selected.
+    /// Routes a speak call to whichever TTS backend is currently selected
+    /// for chat responses. Kokoro is **not** a chat-TTS choice — it's
+    /// reserved for ⌃⇧L read-aloud because it's the only backend we drive
+    /// with per-word highlight timings.
     private func speakTextWithActiveTTSProvider(_ text: String) async throws {
         if selectedTTSProvider == "supertonic" {
             try await supertonicTTSClient.speakText(text)
@@ -1964,17 +2065,22 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Stops playback on whichever TTS backend is currently active.
+    /// Stops playback on the chat-TTS backend AND on Kokoro (read-aloud) AND
+    /// clears the highlight overlay — whatever is currently speaking.
     private func stopActiveTTSPlayback() {
         if selectedTTSProvider == "supertonic" {
             supertonicTTSClient.stopPlayback()
         } else {
             elevenLabsTTSClient.stopPlayback()
         }
+        kokoroTTSClient.stopPlayback()
+        readAloudHighlightOverlayManager.hide()
+        readAloudTextPopoverOverlayManager.hide()
     }
 
-    /// True if the currently selected TTS backend has audio playing.
+    /// True if any TTS backend (chat or read-aloud) has audio playing.
     private var isActiveTTSPlaying: Bool {
+        if kokoroTTSClient.isPlaying { return true }
         if selectedTTSProvider == "supertonic" {
             return supertonicTTSClient.isPlaying
         } else {
@@ -1982,16 +2088,39 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    // MARK: - Read Aloud (⌥⌘R)
+    // MARK: - Read Aloud (⌃⇧L)
+
+    /// Cancels any in-progress read-aloud: stops Kokoro, hides the highlight
+    /// overlay, kills the task that's driving the synthesis loop, and flips
+    /// `isReadAloudPlaying` back so the menu bar icon returns to the triangle.
+    /// Safe to call when nothing is playing (no-op).
+    ///
+    /// Exposed as a public entry point so the menu-bar status-item click can
+    /// stop the read without the user needing to hit the keyboard shortcut
+    /// or find the chat window — which is often occluded during a read since
+    /// the user is looking at another app.
+    func stopReadAloud() {
+        activeReadAloudToken = nil
+        readAloudCurrentTask?.cancel()
+        readAloudCurrentTask = nil
+        stopActiveTTSPlayback()
+        kokoroTTSClient.stopPlayback()
+        readAloudHighlightOverlayManager.hide()
+        readAloudTextPopoverOverlayManager.hide()
+        isReadAloudPlaying = false
+    }
 
     /// Toggles read-aloud of the frontmost app's visible text.
     ///
     /// Behavior:
     ///   - If TTS is currently speaking (from a voice response or a previous
-    ///     read-aloud), stop it and do nothing else. Second tap = cancel.
+    ///     read-aloud), stop it and clear the highlight. Second tap = cancel.
     ///   - Otherwise, extract text from the frontmost app via the Accessibility
-    ///     API (Vision OCR fallback for Chrome/Electron) and speak it via the
-    ///     currently selected TTS backend (ElevenLabs or Supertonic).
+    ///     API (Vision OCR fallback for Chrome/Electron) and speak it via
+    ///     **Kokoro** — regardless of the user's chat-TTS preference — because
+    ///     Kokoro is the only backend that emits per-word start timestamps.
+    ///     As each word begins playing, a yellow highlight rectangle jumps to
+    ///     cover that word on screen (lector-style follow-along).
     ///
     /// Runs completely independently of push-to-talk: no dictation, no LLM
     /// round-trip, no conversation history. The frontmost app is evaluated at
@@ -2000,33 +2129,436 @@ final class CompanionManager: ObservableObject {
     func toggleReadAloudOfFrontmostApp() {
         guard isReadAloudShortcutEnabled else { return }
 
-        if isActiveTTSPlaying || readAloudCurrentTask != nil {
-            readAloudCurrentTask?.cancel()
-            readAloudCurrentTask = nil
-            stopActiveTTSPlayback()
+        if isActiveTTSPlaying || readAloudCurrentTask != nil || kokoroTTSClient.isPlaying {
+            stopReadAloud()
             return
         }
 
+        // Read-aloud sessions should always live in their own conversation so
+        // they never mix with an existing text/voice thread. We create it at
+        // trigger-time, which also preserves an empty conversation if the user
+        // cancels immediately.
+        createNewConversation()
+
+        isReadAloudPlaying = true
+        let sessionToken = UUID()
+        activeReadAloudToken = sessionToken
+        let readTriggerCursorPoint = NSEvent.mouseLocation
+        let cursorScreenFrameAtTrigger = NSScreen.screens.first(where: {
+            $0.frame.contains(readTriggerCursorPoint)
+        })?.frame
+
         readAloudCurrentTask = Task { [weak self] in
             guard let self else { return }
+            // Capture the conversation active when the user triggered the
+            // shortcut — if they switch mid-playback, the captured message
+            // still lands in the original conversation.
+            let conversationIDForSave = self.activeConversationID
+            let readAloudMessageID = UUID()
+
+            // Capture the frontmost app info now for the card's app badge.
+            let frontmostApp = NSWorkspace.shared.frontmostApplication
+            let foregroundAppBundleID = frontmostApp?.bundleIdentifier
+            let foregroundAppName = frontmostApp?.localizedName
+
             do {
                 let extractionResult = try await self.readAloudTextExtractor.extract()
-                let textToSpeak = extractionResult.fullText.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !textToSpeak.isEmpty else {
-                    print("[ReadAloud] No text found in frontmost app")
-                    self.readAloudCurrentTask = nil
-                    return
-                }
                 if Task.isCancelled {
-                    self.readAloudCurrentTask = nil
+                    if self.activeReadAloudToken == sessionToken {
+                        self.readAloudCurrentTask = nil
+                        self.isReadAloudPlaying = false
+                        self.activeReadAloudToken = nil
+                    }
                     return
                 }
-                print("[ReadAloud] Speaking \(textToSpeak.count) chars via \(self.selectedTTSProvider) (source: \(extractionResult.source))")
-                try await self.speakTextWithActiveTTSProvider(textToSpeak)
+                // Take a fresh full-screen screenshot for the chat card, gated
+                // on the user's "Capture screenshot" read-aloud preference.
+                // When disabled the card shows a text-only entry and replay
+                // is audio-only (no popover).
+                let screenCaptures: [CompanionScreenCapture]
+                if self.isReadAloudScreenshotCaptureEnabled {
+                    screenCaptures = (try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()) ?? []
+                } else {
+                    screenCaptures = []
+                }
+                let cursorScreenFrameFromCapture = screenCaptures.first(where: {
+                    $0.displayFrame.contains(readTriggerCursorPoint)
+                })?.displayFrame
+                let extractedTextResult = self.readAloudReadMode == "fromCursorPoint"
+                    ? Self.sliceReadAloudTextFromCursorPoint(
+                        fullText: extractionResult.fullText,
+                        words: extractionResult.words,
+                        cursorPoint: readTriggerCursorPoint,
+                        cursorScreenFrame: cursorScreenFrameFromCapture ?? cursorScreenFrameAtTrigger
+                    )
+                    : (text: extractionResult.fullText, words: extractionResult.words)
+                let textToSpeak = extractedTextResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !textToSpeak.isEmpty else {
+                    readAloudLogger.notice("no text found in frontmost app after cursor slicing")
+                    if self.activeReadAloudToken == sessionToken {
+                        self.readAloudCurrentTask = nil
+                        self.isReadAloudPlaying = false
+                        self.activeReadAloudToken = nil
+                    }
+                    return
+                }
+                let detectedLanguageCode = Self.detectDominantLanguageCode(for: textToSpeak)
+                self.lastReadAloudDetectedLanguageCode = detectedLanguageCode
+                readAloudLogger.info("speaking \(textToSpeak.count, privacy: .public) chars via Kokoro (source: \(String(describing: extractionResult.source), privacy: .public))")
+                readAloudLogger.info("detected language: \(detectedLanguageCode, privacy: .public)")
+                if self.readAloudHighlightStyle == "popover" {
+                    self.readAloudHighlightOverlayManager.hide()
+                    self.readAloudTextPopoverOverlayManager.show(fullText: textToSpeak)
+                } else {
+                    self.readAloudTextPopoverOverlayManager.hide()
+                }
+                // Append a placeholder message immediately so the user sees
+                // "Read aloud from <app>" in the chat while Kokoro runs.
+                let placeholderMessage = ChatMessage(
+                    id: readAloudMessageID,
+                    role: .user,
+                    content: textToSpeak,
+                    source: .readAloud,
+                    ocrText: extractionResult.source == .ocr ? textToSpeak : nil,
+                    screenshotFileNames: [],
+                    foregroundAppBundleID: foregroundAppBundleID,
+                    foregroundAppName: foregroundAppName,
+                    readAloudCapture: nil
+                )
+                self.chatMessages.append(placeholderMessage)
+
+                // Save screenshots to disk synchronously (compression ~1s) so
+                // we can pair each saved file name with the display frame it
+                // was captured from — needed later to build screenshotFrames
+                // on the final capture data.
+                let rawCaptureDataItems = screenCaptures.map { $0.imageData }
+                let displayFramesByIndex = screenCaptures.map { $0.displayFrame }
+                let savedScreenshotFileNames = self.conversationStore.saveCompressedScreenshots(
+                    rawCaptureDataItems,
+                    forMessageWithID: readAloudMessageID
+                )
+                if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == readAloudMessageID }) {
+                    self.chatMessages[messageIndex].screenshotFileNames = savedScreenshotFileNames
+                }
+                let screenshotFrames: [ReadAloudScreenshotFrame] = zip(savedScreenshotFileNames, displayFramesByIndex).map {
+                    ReadAloudScreenshotFrame(screenshotFileName: $0, frame: $1)
+                }
+
+                // Snapshot the extracted words so the live highlight callback
+                // can map each spoken word's character range back to its
+                // screen bounding box without racing against a newer extraction.
+                let wordsOnScreen = extractedTextResult.words
+
+                let captureResult = try await self.kokoroTTSClient.speakTextWithWordTimings(textToSpeak) { [weak self] wordTiming in
+                    guard let self else { return }
+                    self.handleReadAloudWordStarted(wordTiming, wordsOnScreen: wordsOnScreen)
+                }
+
+                // Persist the captured audio + word timings and patch the
+                // placeholder message so the card becomes replay-able.
+                let wavFileName = try ReadAloudStorage.writeWAV(
+                    samples: captureResult.audioSamples,
+                    sampleRate: captureResult.sampleRate,
+                    fileBaseName: readAloudMessageID.uuidString
+                )
+                let audioDurationSeconds = Double(captureResult.audioSamples.count) / captureResult.sampleRate
+                let savedWordTimings: [ReadAloudWordTiming] = captureResult.wordTimings.map { spokenWord in
+                    // Use the unioned screen bounds matching this word's
+                    // character range. Falls back to .zero when the extractor
+                    // didn't have bounds (e.g. Misaki renormalized the text).
+                    let screenBounds = Self.unionedScreenBounds(
+                        forSpokenRange: spokenWord.characterRange,
+                        in: wordsOnScreen
+                    )
+                    return ReadAloudWordTiming(
+                        text: spokenWord.text,
+                        startSeconds: spokenWord.startSeconds,
+                        endSeconds: spokenWord.endSeconds,
+                        screenBounds: screenBounds
+                    )
+                }
+                let capture = ReadAloudCaptureData(
+                    audioWavFileName: wavFileName,
+                    audioDurationSeconds: audioDurationSeconds,
+                    wordTimings: savedWordTimings,
+                    screenshotFrames: screenshotFrames
+                )
+
+                if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == readAloudMessageID }) {
+                    self.chatMessages[messageIndex].readAloudCapture = capture
+                }
+
+                if let saveID = conversationIDForSave {
+                    if saveID == self.activeConversationID {
+                        self.conversationStore.saveMessages(self.chatMessages, for: saveID)
+                        self.updateConversationMetadata(for: saveID)
+                    } else {
+                        var originalMessages = self.conversationStore.loadMessages(for: saveID)
+                        originalMessages.append(placeholderMessage)
+                        if let messageIndex = originalMessages.firstIndex(where: { $0.id == readAloudMessageID }) {
+                            originalMessages[messageIndex].readAloudCapture = capture
+                        }
+                        self.conversationStore.saveMessages(originalMessages, for: saveID)
+                    }
+                }
+            } catch is CancellationError {
+                // User tapped the shortcut again mid-flight; this is expected.
+                // The shared model download keeps running in the background so
+                // the next press lands on a warm cache.
+                readAloudLogger.info("cancelled (download continues in background if still in progress)")
+                self.removeUncapturedReadAloudPlaceholder(messageID: readAloudMessageID)
+            } catch let nsError as NSError where nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+                readAloudLogger.info("cancelled (download continues in background if still in progress)")
+                self.removeUncapturedReadAloudPlaceholder(messageID: readAloudMessageID)
             } catch {
-                print("⚠️ Read-aloud error: \(error)")
+                readAloudLogger.error("error: \(String(describing: error), privacy: .public)")
+                self.removeUncapturedReadAloudPlaceholder(messageID: readAloudMessageID)
             }
-            self.readAloudCurrentTask = nil
+            self.readAloudHighlightOverlayManager.hide()
+            self.readAloudTextPopoverOverlayManager.hide()
+            // Only clear the current-task / playing flags if this closure is
+            // still the active session. A rapid stop→start sequence can
+            // replace the session token while this (cancelled) closure is
+            // draining; without the guard we would wipe the fresh session's
+            // state and leave the menu bar stuck on the idle triangle icon.
+            if self.activeReadAloudToken == sessionToken {
+                self.readAloudCurrentTask = nil
+                self.isReadAloudPlaying = false
+                self.activeReadAloudToken = nil
+            }
+        }
+    }
+
+    /// Removes a `.readAloud` placeholder that never got its capture filled
+    /// in (because the user cancelled or the download failed). Leaving the
+    /// placeholder in the conversation would stick the UI on "Capturing audio…"
+    /// forever with no replay-able content.
+    private func removeUncapturedReadAloudPlaceholder(messageID: UUID) {
+        guard let index = chatMessages.firstIndex(where: { $0.id == messageID }) else { return }
+        if chatMessages[index].readAloudCapture == nil {
+            chatMessages.remove(at: index)
+        }
+    }
+
+    /// Unions the screen bounding boxes of every ExtractedWordInfo that
+    /// overlaps the given spoken character range, so a Misaki token that
+    /// covers several on-screen words gets a single highlight rectangle.
+    /// Returns `.zero` when no screen words overlap (e.g. Misaki's
+    /// normalizer rewrote the word and no range matches).
+    private static func unionedScreenBounds(
+        forSpokenRange spokenRange: NSRange,
+        in wordsOnScreen: [ExtractedWordInfo]
+    ) -> CGRect {
+        var unioned: CGRect = .zero
+        var didFind = false
+        for extractedWord in wordsOnScreen {
+            if NSIntersectionRange(extractedWord.range, spokenRange).length > 0,
+               extractedWord.screenBounds != .zero {
+                unioned = didFind
+                    ? unioned.union(extractedWord.screenBounds)
+                    : extractedWord.screenBounds
+                didFind = true
+            }
+        }
+        return didFind ? unioned : .zero
+    }
+
+    /// Returns read-aloud text sliced from the word nearest the cursor.
+    /// Also remaps word ranges so Kokoro timings still align with extracted words.
+    private static func sliceReadAloudTextFromCursorPoint(
+        fullText: String,
+        words: [ExtractedWordInfo],
+        cursorPoint: CGPoint,
+        cursorScreenFrame: CGRect?
+    ) -> (text: String, words: [ExtractedWordInfo]) {
+        guard !words.isEmpty else {
+            return (text: fullText, words: words)
+        }
+
+        let wordsWithBounds = words.filter { $0.screenBounds != .zero }
+        guard !wordsWithBounds.isEmpty else {
+            // OCR/AX returned no usable geometry. Do not fake a cursor anchor
+            // by picking index 0 (which feels like "top-left" behavior).
+            return (text: fullText, words: words)
+        }
+
+        let wordsNearCursorContext: [ExtractedWordInfo]
+        if let cursorScreenFrame {
+            let wordsOnCursorScreen = wordsWithBounds.filter {
+                cursorScreenFrame.intersects($0.screenBounds)
+            }
+            wordsNearCursorContext = wordsOnCursorScreen.isEmpty ? wordsWithBounds : wordsOnCursorScreen
+        } else {
+            wordsNearCursorContext = wordsWithBounds
+        }
+
+        let wordDirectlyUnderCursor = wordsNearCursorContext.first(where: {
+            $0.screenBounds != .zero && $0.screenBounds.contains(cursorPoint)
+        })
+        let nearestWordByDistance = wordsNearCursorContext.min(by: { firstWord, secondWord in
+            distanceFromPoint(cursorPoint, toRect: firstWord.screenBounds)
+                < distanceFromPoint(cursorPoint, toRect: secondWord.screenBounds)
+        })
+        guard let chosenWord = wordDirectlyUnderCursor ?? nearestWordByDistance else {
+            return (text: fullText, words: words)
+        }
+
+        let nearestWordStartLocation = chosenWord.range.location
+        let fullTextNSString = fullText as NSString
+        var readStartLocation = nearestWordStartLocation
+
+        if nearestWordStartLocation > 0 {
+            let searchRangeBeforeNearestWord = NSRange(location: 0, length: nearestWordStartLocation)
+            let previousLineBreakRange = fullTextNSString.range(
+                of: "\n",
+                options: .backwards,
+                range: searchRangeBeforeNearestWord
+            )
+            if previousLineBreakRange.location != NSNotFound {
+                readStartLocation = previousLineBreakRange.location + previousLineBreakRange.length
+            } else {
+                readStartLocation = 0
+            }
+        }
+
+        let slicedText = fullTextNSString.substring(from: readStartLocation)
+        let slicedWords: [ExtractedWordInfo] = words.compactMap { extractedWordInfo in
+            guard extractedWordInfo.range.location >= readStartLocation else { return nil }
+            return ExtractedWordInfo(
+                text: extractedWordInfo.text,
+                range: NSRange(
+                    location: extractedWordInfo.range.location - readStartLocation,
+                    length: extractedWordInfo.range.length
+                ),
+                screenBounds: extractedWordInfo.screenBounds
+            )
+        }
+
+        return (text: slicedText, words: slicedWords)
+    }
+
+    private static func distanceFromPoint(_ point: CGPoint, toRect rect: CGRect) -> CGFloat {
+        guard rect != .zero else { return .greatestFiniteMagnitude }
+        let deltaX = point.x - rect.midX
+        let deltaY = point.y - rect.midY
+        return sqrt(deltaX * deltaX + deltaY * deltaY)
+    }
+
+    private static func detectDominantLanguageCode(for text: String) -> String {
+        let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedText.isEmpty else { return "und" }
+
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(normalizedText)
+        guard let dominantLanguage = recognizer.dominantLanguage else { return "und" }
+        return dominantLanguage.rawValue
+    }
+
+    /// Fires each time Kokoro starts playing the next word, and once with
+    /// `nil` when playback ends. Drives the live highlight overlay using the
+    /// same union-bounds logic we persist into the capture — keeping the
+    /// live animation and the replay animation visually identical.
+    private func handleReadAloudWordStarted(
+        _ wordTiming: KokoroWordTiming?,
+        wordsOnScreen: [ExtractedWordInfo]
+    ) {
+        if readAloudHighlightStyle == "popover" {
+            readAloudHighlightOverlayManager.hide()
+            readAloudTextPopoverOverlayManager.updateCurrentWord(characterRange: wordTiming?.characterRange)
+            return
+        }
+
+        guard let wordTiming else {
+            readAloudHighlightOverlayManager.hide()
+            readAloudTextPopoverOverlayManager.hide()
+            return
+        }
+
+        let unionedBounds = Self.unionedScreenBounds(
+            forSpokenRange: wordTiming.characterRange,
+            in: wordsOnScreen
+        )
+
+        if unionedBounds == .zero {
+            // Misaki normalizer may have rewritten the word (e.g. "Dr." →
+            // "Doctor") with no matching ExtractedWordInfo range, or the
+            // extractor didn't expose bounds for this word. Clear rather than
+            // display a stale rectangle.
+            readAloudHighlightOverlayManager.hide()
+            return
+        }
+
+        readAloudHighlightOverlayManager.showHighlight(coveringScreenRect: unionedBounds)
+    }
+
+    // MARK: - Read-aloud replay (popover + audio-only)
+
+    /// Window controller for the read-aloud replay popover. The popover owns
+    /// its own audio + highlight animation over the captured screenshot, so
+    /// the replay never depends on the live screen state.
+    private lazy var readAloudReplayPopoverController = ReadAloudReplayPopoverController()
+
+    /// Replay controller used by the audio-only replay path (no popover, no
+    /// on-screen highlight). Plays the captured WAV and discards word
+    /// timings since nothing would show them anyway.
+    private lazy var audioOnlyReplayController = ReadAloudReplayController()
+
+    /// True if an audio-only replay (no popover) is currently playing.
+    /// Exposed so the chat card's ▶ Play button can flip its glyph without
+    /// owning the controller directly.
+    @Published private(set) var isAudioOnlyReplayPlayingMessageID: UUID?
+
+    /// Opens the replay popover for a captured read-aloud message, showing
+    /// the screenshot from when the read happened with a highlight rectangle
+    /// animating over each word in sync with the captured audio.
+    func openReadAloudReplayPopover(for message: ChatMessage) {
+        guard let capture = message.readAloudCapture else { return }
+        kokoroTTSClient.stopPlayback()
+        readAloudHighlightOverlayManager.hide()
+        readAloudTextPopoverOverlayManager.hide()
+        audioOnlyReplayController.stop()
+        isAudioOnlyReplayPlayingMessageID = nil
+        readAloudReplayPopoverController.show(
+            capture: capture,
+            fullExtractedText: message.content,
+            conversationStore: conversationStore,
+            foregroundAppName: message.foregroundAppName,
+            highlightStyle: readAloudHighlightStyle
+        )
+    }
+
+    /// Plays the captured audio without any popover or on-screen highlight
+    /// — useful when the user just wants to hear the recording or doesn't
+    /// have a screenshot attached to the message (capture disabled).
+    /// Tapping the button again stops playback.
+    func toggleAudioOnlyReadAloudReplay(for message: ChatMessage) {
+        guard let capture = message.readAloudCapture else { return }
+
+        if isAudioOnlyReplayPlayingMessageID == message.id {
+            audioOnlyReplayController.stop()
+            isAudioOnlyReplayPlayingMessageID = nil
+            return
+        }
+
+        kokoroTTSClient.stopPlayback()
+        readAloudHighlightOverlayManager.hide()
+        readAloudTextPopoverOverlayManager.hide()
+        audioOnlyReplayController.stop()
+
+        do {
+            try audioOnlyReplayController.play(
+                wavFileName: capture.audioWavFileName,
+                wordTimings: []
+            ) { [weak self] timing in
+                guard let self else { return }
+                if timing == nil {
+                    self.isAudioOnlyReplayPlayingMessageID = nil
+                }
+            }
+            isAudioOnlyReplayPlayingMessageID = message.id
+        } catch {
+            print("⚠️ Read-aloud audio-only replay error: \(error)")
+            isAudioOnlyReplayPlayingMessageID = nil
         }
     }
 
@@ -2263,6 +2795,11 @@ final class CompanionManager: ObservableObject {
         noteTitle: String?,
         screenCaptures: [CompanionScreenCapture] = []
     ) {
+        // Short-circuit when the user has turned Actions off entirely.
+        // Individual toggles still exist in Settings so their remembered
+        // state survives the master toggle being flipped back on.
+        guard isActionsMasterEnabled else { return }
+
         // Learning log entries — only written when the toggle is on
         if isLearningLogEnabled {
             for logEntry in actions.logEntries {

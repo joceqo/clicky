@@ -10,6 +10,7 @@
 //  Codable so ConversationStore can persist the message list to JSON.
 //
 
+import CoreGraphics
 import Foundation
 
 /// Whether a chat message was authored by the user or Clicky.
@@ -18,12 +19,81 @@ enum ChatMessageRole: String, Codable {
     case assistant
 }
 
-/// How the message originated — pushed via voice or typed in the chat window.
-/// Used by the chat UI to badge voice messages with a mic icon so the user
-/// can see which exchanges came from push-to-talk vs typing.
+/// How the message originated — pushed via voice, typed in the chat window,
+/// or captured by the ⌃⇧L read-aloud shortcut.
+/// Used by the chat UI to badge messages appropriately.
 enum ChatMessageSource: String, Codable {
     case voice
     case text
+    case readAloud
+}
+
+/// A single word's captured timing inside a read-aloud recording. Persists
+/// what was sent to the highlight overlay so a later Replay can reproduce
+/// the animation frame-for-frame. Screen bounds are stored in AppKit screen
+/// coords (bottom-left origin) the way `ExtractedWordInfo` delivers them.
+struct ReadAloudWordTiming: Codable, Sendable {
+    let text: String
+    let startSeconds: Double
+    let endSeconds: Double
+    let screenBoundsX: CGFloat
+    let screenBoundsY: CGFloat
+    let screenBoundsWidth: CGFloat
+    let screenBoundsHeight: CGFloat
+
+    var screenBounds: CGRect {
+        CGRect(x: screenBoundsX, y: screenBoundsY, width: screenBoundsWidth, height: screenBoundsHeight)
+    }
+
+    init(text: String, startSeconds: Double, endSeconds: Double, screenBounds: CGRect) {
+        self.text = text
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.screenBoundsX = screenBounds.origin.x
+        self.screenBoundsY = screenBounds.origin.y
+        self.screenBoundsWidth = screenBounds.size.width
+        self.screenBoundsHeight = screenBounds.size.height
+    }
+}
+
+/// Screen frame of a single captured screenshot at capture time. Stored so
+/// the replay popover can map a word's screen-coord bounding box into image
+/// pixel coordinates on that screenshot.
+struct ReadAloudScreenshotFrame: Codable, Sendable {
+    let screenshotFileName: String
+    let frameOriginX: CGFloat
+    let frameOriginY: CGFloat
+    let frameWidth: CGFloat
+    let frameHeight: CGFloat
+
+    var frame: CGRect {
+        CGRect(x: frameOriginX, y: frameOriginY, width: frameWidth, height: frameHeight)
+    }
+
+    init(screenshotFileName: String, frame: CGRect) {
+        self.screenshotFileName = screenshotFileName
+        self.frameOriginX = frame.origin.x
+        self.frameOriginY = frame.origin.y
+        self.frameWidth = frame.size.width
+        self.frameHeight = frame.size.height
+    }
+}
+
+/// All data attached to a `source == .readAloud` message: the WAV file name
+/// of the captured Kokoro audio, and per-word timings so a Replay can
+/// re-drive the highlight overlay.
+struct ReadAloudCaptureData: Codable, Sendable {
+    /// File name (not full path) of the WAV inside the readaloud storage dir.
+    let audioWavFileName: String
+    /// Seconds of audio captured. Convenience so the UI doesn't have to open
+    /// the WAV to show duration.
+    let audioDurationSeconds: Double
+    /// Per-word timings captured during playback, ordered by startSeconds.
+    let wordTimings: [ReadAloudWordTiming]
+    /// Per-screenshot display frame at capture time, so the replay popover
+    /// can map word screen bounds into image-local coords. Empty for legacy
+    /// captures taken before this field was added (graceful degradation).
+    var screenshotFrames: [ReadAloudScreenshotFrame] = []
 }
 
 /// A single message in the Clicky chat window.
@@ -61,6 +131,10 @@ struct ChatMessage: Identifiable, Codable {
     /// How long the model took to generate this response, in seconds.
     /// `nil` for user messages and while still streaming. Set once streaming completes.
     var responseDurationSeconds: Double?
+    /// Captured audio + word timings for `source == .readAloud` messages.
+    /// `nil` for all other message types. Populated after Kokoro synthesis
+    /// finishes; until then the message card shows a "captured…" placeholder.
+    var readAloudCapture: ReadAloudCaptureData?
 
     /// Standard init — generates a new UUID automatically.
     init(
@@ -72,7 +146,8 @@ struct ChatMessage: Identifiable, Codable {
         screenshotFileNames: [String] = [],
         foregroundAppBundleID: String? = nil,
         foregroundAppName: String? = nil,
-        responseDurationSeconds: Double? = nil
+        responseDurationSeconds: Double? = nil,
+        readAloudCapture: ReadAloudCaptureData? = nil
     ) {
         self.id = UUID()
         self.role = role
@@ -85,6 +160,7 @@ struct ChatMessage: Identifiable, Codable {
         self.foregroundAppBundleID = foregroundAppBundleID
         self.foregroundAppName = foregroundAppName
         self.responseDurationSeconds = responseDurationSeconds
+        self.readAloudCapture = readAloudCapture
     }
 
     /// Init with an explicit UUID — used when the ID must be known before
@@ -100,7 +176,8 @@ struct ChatMessage: Identifiable, Codable {
         screenshotFileNames: [String] = [],
         foregroundAppBundleID: String? = nil,
         foregroundAppName: String? = nil,
-        responseDurationSeconds: Double? = nil
+        responseDurationSeconds: Double? = nil,
+        readAloudCapture: ReadAloudCaptureData? = nil
     ) {
         self.id = id
         self.role = role
@@ -113,5 +190,6 @@ struct ChatMessage: Identifiable, Codable {
         self.foregroundAppBundleID = foregroundAppBundleID
         self.foregroundAppName = foregroundAppName
         self.responseDurationSeconds = responseDurationSeconds
+        self.readAloudCapture = readAloudCapture
     }
 }

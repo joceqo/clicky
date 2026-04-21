@@ -12,6 +12,7 @@
 //
 
 import AppKit
+import Combine
 import SwiftUI
 
 extension Notification.Name {
@@ -31,6 +32,10 @@ final class MenuBarPanelManager: NSObject {
     private var clickOutsideMonitor: Any?
     private var dismissPanelObserver: NSObjectProtocol?
 
+    /// Observes `CompanionManager.isReadAloudPlaying` so menu bar behavior can
+    /// react to read state transitions. Retained for the life of the manager.
+    private var readAloudPlayingCancellable: AnyCancellable?
+
     private let companionManager: CompanionManager
     private let panelWidth: CGFloat = 320
     private let panelHeight: CGFloat = 380
@@ -39,6 +44,7 @@ final class MenuBarPanelManager: NSObject {
         self.companionManager = companionManager
         super.init()
         createStatusItem()
+        observeReadAloudPlaying()
 
         dismissPanelObserver = NotificationCenter.default.addObserver(
             forName: .clickyDismissPanel,
@@ -69,6 +75,34 @@ final class MenuBarPanelManager: NSObject {
         button.image?.isTemplate = true
         button.action = #selector(statusItemClicked)
         button.target = self
+    }
+
+    /// Subscribes to the read-aloud playing flag so menu bar panels stay in
+    /// sync with playback state. Runs on the main actor since the publisher is
+    /// MainActor-isolated.
+    private func observeReadAloudPlaying() {
+        readAloudPlayingCancellable = companionManager.$isReadAloudPlaying
+            .removeDuplicates()
+            .sink { [weak self] isPlaying in
+                // Defer to the next runloop tick so the icon swap never runs
+                // mid-layout pass. Combine sinks from a @Published var can fire
+                // while AppKit is in the middle of laying out SwiftUI content
+                // (e.g. when the companion panel is open), which used to emit
+                // "It's not legal to call -layoutSubtreeIfNeeded on a view
+                // which is already being laid out" warnings.
+                DispatchQueue.main.async {
+                    self?.handleReadAloudPlayingChanged(isPlaying: isPlaying)
+                }
+            }
+    }
+
+    /// Keeps the menu bar icon fixed as the Clicky triangle, while still
+    /// providing state feedback through tooltip text and panel transitions.
+    private func handleReadAloudPlayingChanged(isPlaying: Bool) {
+        guard let button = statusItem?.button else { return }
+        button.image = makeClickyMenuBarIcon()
+        button.image?.isTemplate = true
+        button.toolTip = isPlaying ? "Reading in progress" : nil
     }
 
     /// Draws the clicky triangle as a menu bar icon. Uses the same shape
@@ -197,6 +231,7 @@ final class MenuBarPanelManager: NSObject {
         )
     }
 
+
     // MARK: - Click Outside Dismissal
 
     /// Installs a global event monitor that hides the panel when the user clicks
@@ -208,21 +243,19 @@ final class MenuBarPanelManager: NSObject {
 
         clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
-        ) { [weak self] event in
-            guard let self, let panel = self.panel else { return }
+        ) { [weak self] _ in
+            guard let self else { return }
 
-            // Check if the click is inside the status item button — if so, the
-            // statusItemClicked handler will toggle the panel, so don't also hide.
             let clickLocation = NSEvent.mouseLocation
-            if panel.frame.contains(clickLocation) {
+            let isInsideMainPanel = self.panel?.frame.contains(clickLocation) ?? false
+            // If click lands inside panel, don't dismiss.
+            if isInsideMainPanel {
                 return
             }
 
             // Delay dismissal slightly to avoid closing the panel when
             // a system permission dialog appears (e.g. microphone access).
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                guard panel.isVisible else { return }
-
                 // If permissions aren't all granted yet, a system dialog
                 // may have focus — don't dismiss during onboarding.
                 if !self.companionManager.allPermissionsGranted && !NSApp.isActive {

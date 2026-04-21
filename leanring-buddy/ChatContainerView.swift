@@ -9,7 +9,6 @@
 //
 
 import SwiftUI
-import SwiftGrab
 
 struct ChatContainerView: View {
     @ObservedObject var companionManager: CompanionManager
@@ -80,7 +79,6 @@ struct ChatContainerView: View {
                 .help(isShowingSettings ? "Back to Chat" : "Settings")
             }
         }
-        .swiftGrab(enabled: true, mode: .appLocal) { _ in }
     }
 
     private var activeConversationTitle: String {
