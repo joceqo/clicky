@@ -407,6 +407,12 @@ final class TextExtractor {
         for textObservation in observations {
             guard let bestCandidate = textObservation.topCandidates(1).first else { continue }
             let lineText = bestCandidate.string
+            // Capture the line-level bounding box now. Vision sometimes refuses to
+            // give per-word boxes (short words, edge glyphs, bilingual text) but
+            // always provides the line box. We fall back to a character-fraction
+            // estimate within the line rather than returning .zero, which would
+            // cause cursor anchoring to silently degrade to "read from top".
+            let lineObservationBoundingBox = textObservation.boundingBox
 
             if !fullText.isEmpty { fullText += "\n" }
             let lineStartIndex = fullText.count
@@ -437,16 +443,67 @@ final class TextExtractor {
                         screenBounds: CGRect(x: screenX, y: screenY, width: screenWidth, height: screenHeight)
                     ))
                 } else {
+                    // Per-word box unavailable — estimate from the line's bounding box
+                    // using the word's character fraction within the line. Character count
+                    // is not pixel-accurate (variable-width fonts, ligatures) but produces
+                    // a plausible x-position for anchoring. Much better than .zero, which
+                    // makes sliceReadAloudTextFromCursorPoint fall back to reading from the
+                    // very first word in the document (top-left symptom).
+                    let estimatedBounds = estimateWordBoundsFromLineBoundingBox(
+                        wordRange: substringRange,
+                        lineText: lineText,
+                        lineNormalizedBoundingBox: lineObservationBoundingBox,
+                        windowBounds: windowBounds
+                    )
                     resultWords.append(ExtractedWordInfo(
                         text: wordString,
                         range: globalRange,
-                        screenBounds: .zero
+                        screenBounds: estimatedBounds
                     ))
                 }
             }
         }
 
         return (fullText, resultWords)
+    }
+
+    /// Estimates a word's screen bounding box when Vision's per-word
+    /// `boundingBox(for:)` returns nil. Divides the line's bounding box into
+    /// equal-width character slots and extracts the word's slot range.
+    ///
+    /// Character count is not pixel-accurate (variable-width fonts, kerning,
+    /// ligatures) but produces a plausible x-range for anchoring purposes.
+    /// The y-position and height are taken directly from the line observation,
+    /// so vertical accuracy is exact even when horizontal is approximate.
+    private func estimateWordBoundsFromLineBoundingBox(
+        wordRange: Range<String.Index>,
+        lineText: String,
+        lineNormalizedBoundingBox: CGRect,
+        windowBounds: CGRect
+    ) -> CGRect {
+        let lineTotalCharacters = lineText.count
+        guard lineTotalCharacters > 0 else { return .zero }
+
+        let wordStartCharacterOffset = lineText.distance(from: lineText.startIndex, to: wordRange.lowerBound)
+        let wordEndCharacterOffset = lineText.distance(from: lineText.startIndex, to: wordRange.upperBound)
+
+        let startFraction = CGFloat(wordStartCharacterOffset) / CGFloat(lineTotalCharacters)
+        let endFraction = CGFloat(wordEndCharacterOffset) / CGFloat(lineTotalCharacters)
+
+        // Vision normalized coords: origin bottom-left, y increases upward.
+        // lineNormalizedBoundingBox.minX/maxX are the left/right edges of the line.
+        let lineNormLeft = lineNormalizedBoundingBox.minX
+        let lineNormWidth = lineNormalizedBoundingBox.width
+
+        let wordNormLeft = lineNormLeft + startFraction * lineNormWidth
+        let wordNormRight = lineNormLeft + endFraction * lineNormWidth
+
+        let screenX = windowBounds.origin.x + wordNormLeft * windowBounds.width
+        let screenY = windowBounds.origin.y + lineNormalizedBoundingBox.origin.y * windowBounds.height
+        let screenWidth = max(1, (wordNormRight - wordNormLeft) * windowBounds.width)
+        let screenHeight = max(1, lineNormalizedBoundingBox.height * windowBounds.height)
+
+        return CGRect(x: screenX, y: screenY, width: screenWidth, height: screenHeight)
     }
 
     // MARK: - AX Helpers

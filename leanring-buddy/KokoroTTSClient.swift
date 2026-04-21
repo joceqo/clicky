@@ -344,6 +344,32 @@ final class KokoroTTSClient {
         )
     }
 
+    /// Starts the model download (if not already cached) and loads the MLX engine
+    /// into memory in the background so the first ⌃⇧L press doesn't pay the full
+    /// cold-start cost (~330MB download on first ever launch, plus engine init ~1–3s
+    /// on every cold app launch).
+    ///
+    /// Safe to call at app startup — it's a no-op if the download is already in
+    /// flight or the engine is already loaded. `loadEngineIfNeeded()` runs on the
+    /// main actor but inside a low-priority Task so it doesn't block the launch
+    /// sequence; the main actor is only held for the synchronous model-load window.
+    func beginBackgroundPrewarm() {
+        Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.ensureModelAndVoicesDownloaded()
+                if self.loadedEngine == nil {
+                    _ = try self.loadEngineIfNeeded()
+                    kokoroLogger.info("background prewarm complete — engine ready for first ⌃⇧L")
+                }
+            } catch {
+                // Non-fatal: prewarm failure is silent; the user just pays the
+                // cold-start cost on first use instead of at app launch.
+                kokoroLogger.info("background prewarm failed (will retry on first use): \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
     /// Stops any in-progress synthesis or playback immediately and clears any
     /// pending word-timing callbacks.
     ///

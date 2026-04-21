@@ -22,6 +22,11 @@ import os
 /// log show --predicate 'category == "ReadAloud"' surfaces only this path.
 private let readAloudLogger = Logger(subsystem: "com.clicky.leanring-buddy", category: "ReadAloud")
 
+/// Signposter for Instruments / `xctrace` profiling of the read-aloud pipeline.
+/// Each ⌃⇧L press opens one "ReadAloudSession" interval that contains named
+/// sub-intervals for each major phase. View in Instruments → Points of Interest.
+private let readAloudSignposter = OSSignposter(subsystem: "com.clicky.leanring-buddy", category: "ReadAloud")
+
 enum CompanionVoiceState {
     case idle
     case listening
@@ -857,6 +862,12 @@ final class CompanionManager: ObservableObject {
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
+
+        // Pre-warm the Kokoro model so the first ⌃⇧L read-aloud keypress
+        // doesn't stall waiting for model download / engine init. The 330MB
+        // download only happens on first ever launch; subsequent launches just
+        // reload the safetensors from disk (~1–3s on Apple Silicon).
+        kokoroTTSClient.beginBackgroundPrewarm()
 
         // Discover LM Studio models at startup and re-check periodically so
         // the model cycler picks up LM Studio whenever it starts or stops.
@@ -2144,9 +2155,16 @@ final class CompanionManager: ObservableObject {
         let sessionToken = UUID()
         activeReadAloudToken = sessionToken
         let readTriggerCursorPoint = NSEvent.mouseLocation
+        let readTriggerTimestamp = Date()
         let cursorScreenFrameAtTrigger = NSScreen.screens.first(where: {
             $0.frame.contains(readTriggerCursorPoint)
         })?.frame
+
+        // Open a signpost interval so Instruments / xctrace can visualise the
+        // full pipeline: TextExtraction → CursorSlice → Synthesis → FirstAudio.
+        let signpostID = readAloudSignposter.makeSignpostID()
+        readAloudSignposter.emitEvent("Trigger", id: signpostID,
+            "cursor=(%.0f,%.0f)", readTriggerCursorPoint.x, readTriggerCursorPoint.y)
 
         readAloudCurrentTask = Task { [weak self] in
             guard let self else { return }
@@ -2162,7 +2180,14 @@ final class CompanionManager: ObservableObject {
             let foregroundAppName = frontmostApp?.localizedName
 
             do {
+                let extractionIntervalState = readAloudSignposter.beginInterval("TextExtraction", id: signpostID)
                 let extractionResult = try await self.readAloudTextExtractor.extract()
+                let extractionDurationSeconds = Date().timeIntervalSince(readTriggerTimestamp)
+                let wordsWithNonZeroBounds = extractionResult.words.filter { $0.screenBounds != .zero }.count
+                readAloudSignposter.endInterval("TextExtraction", extractionIntervalState,
+                    "source=\(String(describing: extractionResult.source)) words=\(extractionResult.words.count) withBounds=\(wordsWithNonZeroBounds) durationS=\(String(format: "%.2f", extractionDurationSeconds))")
+                readAloudLogger.info("extraction: source=\(String(describing: extractionResult.source), privacy: .public) words=\(extractionResult.words.count, privacy: .public) withBounds=\(wordsWithNonZeroBounds, privacy: .public) durationS=\(String(format: "%.2f", extractionDurationSeconds), privacy: .public)")
+
                 if Task.isCancelled {
                     if self.activeReadAloudToken == sessionToken {
                         self.readAloudCurrentTask = nil
@@ -2184,6 +2209,8 @@ final class CompanionManager: ObservableObject {
                 let cursorScreenFrameFromCapture = screenCaptures.first(where: {
                     $0.displayFrame.contains(readTriggerCursorPoint)
                 })?.displayFrame
+
+                let cursorSliceIntervalState = readAloudSignposter.beginInterval("CursorSlice", id: signpostID)
                 let extractedTextResult = self.readAloudReadMode == "fromCursorPoint"
                     ? Self.sliceReadAloudTextFromCursorPoint(
                         fullText: extractionResult.fullText,
@@ -2192,6 +2219,11 @@ final class CompanionManager: ObservableObject {
                         cursorScreenFrame: cursorScreenFrameFromCapture ?? cursorScreenFrameAtTrigger
                     )
                     : (text: extractionResult.fullText, words: extractionResult.words)
+                let slicedWordCount = extractedTextResult.words.filter { $0.screenBounds != .zero }.count
+                readAloudSignposter.endInterval("CursorSlice", cursorSliceIntervalState,
+                    "charsAfterSlice=\(extractedTextResult.text.count) wordsWithBounds=\(slicedWordCount)")
+                readAloudLogger.info("cursor slice: mode=\(self.readAloudReadMode, privacy: .public) charsAfterSlice=\(extractedTextResult.text.count, privacy: .public) wordsWithBounds=\(slicedWordCount, privacy: .public)")
+
                 let textToSpeak = extractedTextResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !textToSpeak.isEmpty else {
                     readAloudLogger.notice("no text found in frontmost app after cursor slicing")
@@ -2227,21 +2259,15 @@ final class CompanionManager: ObservableObject {
                 )
                 self.chatMessages.append(placeholderMessage)
 
-                // Save screenshots to disk synchronously (compression ~1s) so
-                // we can pair each saved file name with the display frame it
-                // was captured from — needed later to build screenshotFrames
-                // on the final capture data.
+                // Kick off JPEG compression for the captured screenshots on a
+                // background thread immediately — ConversationStore.saveCompressedScreenshots
+                // is documented as background-thread safe and takes ~1s per session.
+                // By running it concurrently with Kokoro synthesis we eliminate that
+                // second from the hotkey→audio latency critical path.
                 let rawCaptureDataItems = screenCaptures.map { $0.imageData }
                 let displayFramesByIndex = screenCaptures.map { $0.displayFrame }
-                let savedScreenshotFileNames = self.conversationStore.saveCompressedScreenshots(
-                    rawCaptureDataItems,
-                    forMessageWithID: readAloudMessageID
-                )
-                if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == readAloudMessageID }) {
-                    self.chatMessages[messageIndex].screenshotFileNames = savedScreenshotFileNames
-                }
-                let screenshotFrames: [ReadAloudScreenshotFrame] = zip(savedScreenshotFileNames, displayFramesByIndex).map {
-                    ReadAloudScreenshotFrame(screenshotFileName: $0, frame: $1)
+                let screenshotSaveTask = Task.detached(priority: .utility) { [rawCaptureDataItems, readAloudMessageID, store = self.conversationStore] in
+                    store.saveCompressedScreenshots(rawCaptureDataItems, forMessageWithID: readAloudMessageID)
                 }
 
                 // Snapshot the extracted words so the live highlight callback
@@ -2249,9 +2275,25 @@ final class CompanionManager: ObservableObject {
                 // screen bounding box without racing against a newer extraction.
                 let wordsOnScreen = extractedTextResult.words
 
+                let synthesisIntervalState = readAloudSignposter.beginInterval("KokoroSynthesis", id: signpostID,
+                    "chars=\(textToSpeak.count)")
                 let captureResult = try await self.kokoroTTSClient.speakTextWithWordTimings(textToSpeak) { [weak self] wordTiming in
                     guard let self else { return }
                     self.handleReadAloudWordStarted(wordTiming, wordsOnScreen: wordsOnScreen)
+                }
+                let endToEndLatencySeconds = Date().timeIntervalSince(readTriggerTimestamp)
+                readAloudSignposter.endInterval("KokoroSynthesis", synthesisIntervalState,
+                    "words=\(captureResult.wordTimings.count) durationS=\(String(format: "%.1f", captureResult.audioSamples.isEmpty ? 0 : Double(captureResult.audioSamples.count)/captureResult.sampleRate))")
+                readAloudLogger.info("session complete: chars=\(textToSpeak.count, privacy: .public) words=\(captureResult.wordTimings.count, privacy: .public) endToEndS=\(String(format: "%.2f", endToEndLatencySeconds), privacy: .public)")
+
+                // Collect screenshot filenames now — the background compression
+                // task has had the entire synthesis duration to complete.
+                let savedScreenshotFileNames = await screenshotSaveTask.value
+                if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == readAloudMessageID }) {
+                    self.chatMessages[messageIndex].screenshotFileNames = savedScreenshotFileNames
+                }
+                let screenshotFrames: [ReadAloudScreenshotFrame] = zip(savedScreenshotFileNames, displayFramesByIndex).map {
+                    ReadAloudScreenshotFrame(screenshotFileName: $0, frame: $1)
                 }
 
                 // Persist the captured audio + word timings and patch the
@@ -2384,8 +2426,12 @@ final class CompanionManager: ObservableObject {
 
         let wordsNearCursorContext: [ExtractedWordInfo]
         if let cursorScreenFrame {
-            let wordsOnCursorScreen = wordsWithBounds.filter {
-                cursorScreenFrame.intersects($0.screenBounds)
+            // Use the word's visual center to determine which screen it belongs to.
+            // `intersects` would include words that straddle the boundary between two
+            // monitors — those words would satisfy BOTH screens' filter and skew the
+            // nearest-word distance calculation toward the wrong anchor.
+            let wordsOnCursorScreen = wordsWithBounds.filter { wordInfo in
+                cursorScreenFrame.contains(CGPoint(x: wordInfo.screenBounds.midX, y: wordInfo.screenBounds.midY))
             }
             wordsNearCursorContext = wordsOnCursorScreen.isEmpty ? wordsWithBounds : wordsOnCursorScreen
         } else {
