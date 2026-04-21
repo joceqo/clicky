@@ -2196,6 +2196,35 @@ final class CompanionManager: ObservableObject {
                     }
                     return
                 }
+                // If fromCursorPoint mode and the full extraction has zero words with
+                // usable screen bounds, fall back to a focused OCR crop (640×320pt)
+                // centered on the cursor. All words in the crop result are physically
+                // close to the cursor so anchoring is trivially accurate — the nearest-word
+                // search finds the right line immediately without scanning the whole document.
+                // This covers AX-only apps that don't expose kAXBoundsForRangeParameterizedAttribute.
+                let effectiveExtractionResult: ScreenTextExtractionResult
+                if self.readAloudReadMode == "fromCursorPoint",
+                   !extractionResult.words.contains(where: { $0.screenBounds != .zero }) {
+                    readAloudSignposter.emitEvent("FocusedCropFallback", id: signpostID,
+                        "cursor=(%.0f,%.0f)", readTriggerCursorPoint.x, readTriggerCursorPoint.y)
+                    readAloudLogger.info("fromCursorPoint: full extraction has no usable bounds — trying focused crop OCR")
+                    let cropIntervalState = readAloudSignposter.beginInterval("FocusedCropOCR", id: signpostID)
+                    if let cropResult = try? await self.readAloudTextExtractor.extractViaOCRAroundPoint(readTriggerCursorPoint),
+                       cropResult.words.contains(where: { $0.screenBounds != .zero }) {
+                        let cropWordsWithBounds = cropResult.words.filter { $0.screenBounds != .zero }.count
+                        readAloudSignposter.endInterval("FocusedCropOCR", cropIntervalState,
+                            "words=\(cropResult.words.count) withBounds=\(cropWordsWithBounds) chars=\(cropResult.fullText.count)")
+                        readAloudLogger.info("focused crop OCR: words=\(cropResult.words.count, privacy: .public) withBounds=\(cropWordsWithBounds, privacy: .public) chars=\(cropResult.fullText.count, privacy: .public)")
+                        effectiveExtractionResult = cropResult
+                    } else {
+                        readAloudSignposter.endInterval("FocusedCropOCR", cropIntervalState, "noBounds — using full extraction")
+                        readAloudLogger.notice("focused crop OCR also gave no bounds — falling back to full extraction from top")
+                        effectiveExtractionResult = extractionResult
+                    }
+                } else {
+                    effectiveExtractionResult = extractionResult
+                }
+
                 // Take a fresh full-screen screenshot for the chat card, gated
                 // on the user's "Capture screenshot" read-aloud preference.
                 // When disabled the card shows a text-only entry and replay
@@ -2213,12 +2242,12 @@ final class CompanionManager: ObservableObject {
                 let cursorSliceIntervalState = readAloudSignposter.beginInterval("CursorSlice", id: signpostID)
                 let extractedTextResult = self.readAloudReadMode == "fromCursorPoint"
                     ? Self.sliceReadAloudTextFromCursorPoint(
-                        fullText: extractionResult.fullText,
-                        words: extractionResult.words,
+                        fullText: effectiveExtractionResult.fullText,
+                        words: effectiveExtractionResult.words,
                         cursorPoint: readTriggerCursorPoint,
                         cursorScreenFrame: cursorScreenFrameFromCapture ?? cursorScreenFrameAtTrigger
                     )
-                    : (text: extractionResult.fullText, words: extractionResult.words)
+                    : (text: effectiveExtractionResult.fullText, words: effectiveExtractionResult.words)
                 let slicedWordCount = extractedTextResult.words.filter { $0.screenBounds != .zero }.count
                 readAloudSignposter.endInterval("CursorSlice", cursorSliceIntervalState,
                     "charsAfterSlice=\(extractedTextResult.text.count) wordsWithBounds=\(slicedWordCount)")
@@ -2251,7 +2280,7 @@ final class CompanionManager: ObservableObject {
                     role: .user,
                     content: textToSpeak,
                     source: .readAloud,
-                    ocrText: extractionResult.source == .ocr ? textToSpeak : nil,
+                    ocrText: effectiveExtractionResult.source == .ocr ? textToSpeak : nil,
                     screenshotFileNames: [],
                     foregroundAppBundleID: foregroundAppBundleID,
                     foregroundAppName: foregroundAppName,

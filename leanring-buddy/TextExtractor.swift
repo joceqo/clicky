@@ -467,7 +467,103 @@ final class TextExtractor {
         return (fullText, resultWords)
     }
 
-    /// Estimates a word's screen bounding box when Vision's per-word
+    // MARK: - Strategy C: Focused cursor-region OCR
+
+    /// Captures a region of the screen centered on `cursorPoint` and runs Vision
+    /// OCR on just that crop. All returned words are within `cropSize` points of
+    /// the cursor, so the caller can anchor reading trivially at (or near) the
+    /// crop center without a document-wide nearest-word search.
+    ///
+    /// Used as a fallback in "fromCursorPoint" mode when the full-window AX/OCR
+    /// extraction returns zero words with usable screen bounds — common in apps
+    /// that don't support `kAXBoundsForRangeParameterizedAttribute` and whose OCR
+    /// word boxes Vision can't resolve individually.
+    ///
+    /// - Parameters:
+    ///   - cursorPoint: Cursor position in global AppKit screen coordinates (bottom-left origin).
+    ///   - cropSize: Logical-point dimensions of the region to capture. Defaults to 640×320.
+    func extractViaOCRAroundPoint(
+        _ cursorPoint: CGPoint,
+        cropSize: CGSize = CGSize(width: 640, height: 320)
+    ) async throws -> ScreenTextExtractionResult {
+        // Fall back to the primary screen if the cursor is somehow between monitors.
+        let cursorScreen = NSScreen.screens.first(where: { $0.frame.contains(cursorPoint) })
+                        ?? NSScreen.screens[0]
+
+        // Convert cursor from AppKit global → display-local CG coordinates.
+        // AppKit: origin bottom-left, y increases upward.
+        // Display-local CG: origin top-left of this display, y increases downward.
+        let displayTopInAppKit = cursorScreen.frame.maxY
+        let cursorDisplayCGX = cursorPoint.x - cursorScreen.frame.minX
+        let cursorDisplayCGY = displayTopInAppKit - cursorPoint.y
+
+        // Center the crop on the cursor, clamped so the rect stays within the display.
+        let halfW = cropSize.width / 2
+        let halfH = cropSize.height / 2
+        let rawCropX = cursorDisplayCGX - halfW
+        let rawCropY = cursorDisplayCGY - halfH
+        let clampedCropX = max(0, min(rawCropX, cursorScreen.frame.width - cropSize.width))
+        let clampedCropY = max(0, min(rawCropY, cursorScreen.frame.height - cropSize.height))
+        let actualCropW = min(cropSize.width, cursorScreen.frame.width - clampedCropX)
+        let actualCropH = min(cropSize.height, cursorScreen.frame.height - clampedCropY)
+        let displayLocalSourceRect = CGRect(x: clampedCropX, y: clampedCropY,
+                                            width: actualCropW, height: actualCropH)
+
+        // Convert the captured crop back to AppKit global coords so runVisionOCR can
+        // map Vision's normalized (0–1) coordinates to real screen positions.
+        // AppKit y of the crop's bottom edge = displayTop − (CG_minY + height)
+        let cropLeft = cursorScreen.frame.minX + displayLocalSourceRect.minX
+        let cropBottom = displayTopInAppKit - displayLocalSourceRect.maxY
+        let cropScreenBoundsAppKit = CGRect(x: cropLeft, y: cropBottom,
+                                            width: displayLocalSourceRect.width,
+                                            height: displayLocalSourceRect.height)
+
+        let croppedImage = try await captureCroppedDisplayImage(
+            screen: cursorScreen,
+            displayLocalSourceRect: displayLocalSourceRect
+        )
+
+        let (fullText, words) = try runVisionOCR(on: croppedImage, windowBounds: cropScreenBoundsAppKit)
+        return ScreenTextExtractionResult(fullText: fullText, words: words, source: .ocr)
+    }
+
+    /// Captures a sub-region of a display using ScreenCaptureKit.
+    ///
+    /// `displayLocalSourceRect` is in display-local CG coordinates: origin at the
+    /// top-left of the display, y increases downward, units are logical points.
+    /// This matches the coordinate space expected by `SCStreamConfiguration.sourceRect`.
+    private func captureCroppedDisplayImage(
+        screen: NSScreen,
+        displayLocalSourceRect: CGRect
+    ) async throws -> CGImage {
+        // Match NSScreen to SCDisplay via CGDirectDisplayID — stable across
+        // screen-arrangement changes and safe even when two displays share the
+        // same logical resolution.
+        guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            throw TextExtractionError.noWindowFound
+        }
+
+        let shareableContent = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: true
+        )
+        guard let targetDisplay = shareableContent.displays.first(where: { $0.displayID == displayID }) else {
+            throw TextExtractionError.windowNotCapturable
+        }
+
+        let contentFilter = SCContentFilter(display: targetDisplay, excludingWindows: [])
+        let streamConfig = SCStreamConfiguration()
+        // sourceRect: display-local CG coordinates (top-left origin, logical points).
+        // SCStreamConfiguration.sourceRect uses the same convention as display-local CG.
+        streamConfig.sourceRect = displayLocalSourceRect
+        // 2× resolution for better Vision OCR accuracy on Retina displays.
+        streamConfig.width = Int(displayLocalSourceRect.width * 2)
+        streamConfig.height = Int(displayLocalSourceRect.height * 2)
+
+        return try await SCScreenshotManager.captureImage(
+            contentFilter: contentFilter,
+            configuration: streamConfig
+        )
+    }
     /// `boundingBox(for:)` returns nil. Divides the line's bounding box into
     /// equal-width character slots and extracts the word's slot range.
     ///
