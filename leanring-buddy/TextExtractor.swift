@@ -59,13 +59,27 @@ final class TextExtractor {
     /// user is actually looking at, not just the frontmost PID's first
     /// window.
     func extract(underCursor cursorPoint: CGPoint?) async throws -> ScreenTextExtractionResult {
-        if let axResult = try? extractViaAccessibility(), !axResult.words.isEmpty {
-            // If every word has a zero bounding box, AX didn't give us real screen
-            // positions (common in Chrome and Electron). Fall back to OCR so we at
-            // least have the text even if coords are approximate.
-            let hasRealBounds = axResult.words.contains { $0.screenBounds != .zero }
-            if hasRealBounds {
-                return axResult
+        try await extract(underCursor: cursorPoint, skipAccessibility: false)
+    }
+
+    /// AX-skippable variant so callers with a per-app heuristics cache
+    /// (e.g. `AppExtractionHeuristicsStore`) can jump straight to OCR for
+    /// apps known to return nothing useful from the Accessibility tree
+    /// (Chrome, Electron, VS Code, etc.). Saves the ~50–200ms AX walk cost
+    /// on every trigger for those apps.
+    func extract(
+        underCursor cursorPoint: CGPoint?,
+        skipAccessibility: Bool
+    ) async throws -> ScreenTextExtractionResult {
+        if !skipAccessibility {
+            if let axResult = try? extractViaAccessibility(), !axResult.words.isEmpty {
+                // If every word has a zero bounding box, AX didn't give us real screen
+                // positions (common in Chrome and Electron). Fall back to OCR so we at
+                // least have the text even if coords are approximate.
+                let hasRealBounds = axResult.words.contains { $0.screenBounds != .zero }
+                if hasRealBounds {
+                    return axResult
+                }
             }
         }
         return try await extractViaOCR(underCursor: cursorPoint)
@@ -603,10 +617,47 @@ final class TextExtractor {
     /// - Parameters:
     ///   - cursorPoint: Cursor position in global AppKit screen coordinates (bottom-left origin).
     ///   - cropSize: Logical-point dimensions of the region to capture. Defaults to 640×320.
+    /// Result of a focused cursor-crop OCR pass. Carries an extra
+    /// `bottomEdgeOverflow` count so the caller can decide whether the crop
+    /// clipped mid-content and a full-window OCR is needed to recover the
+    /// text below the crop.
+    struct CursorCropExtractionResult {
+        let extraction: ScreenTextExtractionResult
+        /// Number of OCR words whose bounding box touches the bottom edge
+        /// of the crop rectangle. High values (> ~5) strongly suggest the
+        /// crop clipped mid-paragraph and more content continues below.
+        let bottomEdgeOverflow: Int
+        /// Area of the crop that was OCR'd, in screen points. Used for
+        /// debug logging so the tuning pass has the raw numbers.
+        let cropScreenBounds: CGRect
+    }
+
+    /// Convenience for legacy callers that just want a `ScreenTextExtractionResult`.
     func extractViaOCRAroundPoint(
         _ cursorPoint: CGPoint,
-        cropSize: CGSize = CGSize(width: 640, height: 320)
+        cropSize: CGSize = CGSize(width: 1400, height: 1000),
+        verticalBiasBelowCursor: CGFloat = 0.75
     ) async throws -> ScreenTextExtractionResult {
+        try await extractViaCursorCrop(
+            cursorPoint: cursorPoint,
+            cropSize: cropSize,
+            verticalBiasBelowCursor: verticalBiasBelowCursor
+        ).extraction
+    }
+
+    /// Captures a region around the cursor and runs Vision OCR on it.
+    /// Returns the OCR result plus a `bottomEdgeOverflow` count so the
+    /// caller can decide whether to fall back to a full-window OCR.
+    ///
+    /// Defaults (1400×1000 with 75% of vertical area below cursor) are
+    /// tuned for the "read from cursor forward" case: ~10× faster than
+    /// full-window OCR on a 2K display, and the below-cursor bias puts
+    /// extraction effort where the reading will actually happen.
+    func extractViaCursorCrop(
+        cursorPoint: CGPoint,
+        cropSize: CGSize = CGSize(width: 1400, height: 1000),
+        verticalBiasBelowCursor: CGFloat = 0.75
+    ) async throws -> CursorCropExtractionResult {
         // Fall back to the primary screen if the cursor is somehow between monitors.
         let cursorScreen = NSScreen.screens.first(where: { $0.frame.contains(cursorPoint) })
                         ?? NSScreen.screens[0]
@@ -618,17 +669,31 @@ final class TextExtractor {
         let cursorDisplayCGX = cursorPoint.x - cursorScreen.frame.minX
         let cursorDisplayCGY = displayTopInAppKit - cursorPoint.y
 
-        // Center the crop on the cursor, clamped so the rect stays within the display.
-        let halfW = cropSize.width / 2
-        let halfH = cropSize.height / 2
-        let rawCropX = cursorDisplayCGX - halfW
-        let rawCropY = cursorDisplayCGY - halfH
-        let clampedCropX = max(0, min(rawCropX, cursorScreen.frame.width - cropSize.width))
-        let clampedCropY = max(0, min(rawCropY, cursorScreen.frame.height - cropSize.height))
-        let actualCropW = min(cropSize.width, cursorScreen.frame.width - clampedCropX)
-        let actualCropH = min(cropSize.height, cursorScreen.frame.height - clampedCropY)
-        let displayLocalSourceRect = CGRect(x: clampedCropX, y: clampedCropY,
-                                            width: actualCropW, height: actualCropH)
+        // Position the crop asymmetrically: most of the vertical area goes
+        // below the cursor because cursor-anchored read-aloud reads forward
+        // from the cursor position. A symmetric crop wastes OCR budget on
+        // content the user has already passed.
+        let paddingAboveCursor = cropSize.height * (1 - verticalBiasBelowCursor)
+        let paddingBelowCursor = cropSize.height * verticalBiasBelowCursor
+        let halfWidth = cropSize.width / 2
+        let rawCropX = cursorDisplayCGX - halfWidth
+        let rawCropY = cursorDisplayCGY - paddingAboveCursor
+
+        // Clamp so the rect always lands fully within the display. If the
+        // requested crop is larger than the display itself, shrink it so
+        // the rect fits rather than anchoring at (0, 0) — matters on small
+        // external monitors where the default 1400×1000 exceeds the height.
+        let maxCropWidth = min(cropSize.width, cursorScreen.frame.width)
+        let maxCropHeight = min(cropSize.height, cursorScreen.frame.height)
+        let clampedCropX = max(0, min(rawCropX, cursorScreen.frame.width - maxCropWidth))
+        let clampedCropY = max(0, min(rawCropY, cursorScreen.frame.height - maxCropHeight))
+        let displayLocalSourceRect = CGRect(
+            x: clampedCropX,
+            y: clampedCropY,
+            width: maxCropWidth,
+            height: maxCropHeight
+        )
+        _ = paddingBelowCursor // retained for doc clarity above
 
         // Convert the captured crop back to AppKit global coords so runVisionOCR can
         // map Vision's normalized (0–1) coordinates to real screen positions.
@@ -645,7 +710,22 @@ final class TextExtractor {
         )
 
         let (fullText, words) = try runVisionOCR(on: croppedImage, windowBounds: cropScreenBoundsAppKit)
-        return ScreenTextExtractionResult(fullText: fullText, words: words, source: .ocr)
+
+        // Overflow detector: count words whose bottom edge is within a few
+        // points of the crop's bottom edge. These are the "clipped mid-line"
+        // words that signal there's more content below the crop window.
+        let bottomEdgeThresholdPoints: CGFloat = 6
+        let cropBottomY = cropScreenBoundsAppKit.minY
+        let bottomEdgeOverflowCount = words.filter { word in
+            word.screenBounds != .zero &&
+            word.screenBounds.minY - cropBottomY < bottomEdgeThresholdPoints
+        }.count
+
+        return CursorCropExtractionResult(
+            extraction: ScreenTextExtractionResult(fullText: fullText, words: words, source: .ocr),
+            bottomEdgeOverflow: bottomEdgeOverflowCount,
+            cropScreenBounds: cropScreenBoundsAppKit
+        )
     }
 
     /// Captures a sub-region of a display using ScreenCaptureKit.

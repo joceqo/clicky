@@ -30,6 +30,11 @@ struct ChatSettingsView: View {
     /// General tab — the 8+ toggles are power-user territory, not something
     /// you need to see every time you open Settings.
     @State private var isActionsSectionExpanded: Bool = false
+    /// Expanded by default — this section is how users discover that Clicky
+    /// can read Claude Code aloud and how to wire the Stop hook.
+    @State private var isIntegrationsSectionExpanded: Bool = true
+    @State private var isIntegrationsSetupInstructionsExpanded: Bool = false
+    @State private var integrationsCopyFeedback: String = ""
 
     // General tab state
     @State private var apiKeyInput = ""
@@ -483,6 +488,7 @@ struct ChatSettingsView: View {
             speechSection
             voiceDisplaySection
             readingSection
+            integrationsSection
             actionsSection
         }
     }
@@ -1271,6 +1277,216 @@ struct ChatSettingsView: View {
         }
         .padding(.vertical, 6)
     }
+
+    // MARK: - Integrations
+
+    /// Exposes the Claude Code Stop-hook TTS feature. Toggle controls
+    /// whether Clicky acts on `clicky://speak` URLs; the nested disclosure
+    /// shows a copy-pastable prompt the user drops into Claude Code to
+    /// install the hook. Mirrors SuperUtter's Integrations layout so users
+    /// coming from there find the same mental model.
+    private var integrationsSection: some View {
+        collapsibleSettingsSection(
+            title: "Integrations",
+            isExpanded: $isIntegrationsSectionExpanded,
+            masterToggle: Binding(
+                get: { companionManager.isAutoPlayClaudeCodeEnabled },
+                set: { companionManager.setAutoPlayClaudeCodeEnabled($0) }
+            )
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Auto-Play Claude Code")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    Text("Automatically reads Claude Code responses aloud via the selected TTS voice. Requires a one-time Stop hook in ~/.claude/settings.json — use the setup prompt below.")
+                        .font(.system(size: 11))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider().background(DS.Colors.borderSubtle)
+
+                integrationsSetupInstructions
+            }
+        }
+    }
+
+    /// Collapsible disclosure that shows the copy-paste prompt for wiring
+    /// the Claude Code Stop hook. The user drops this into a Claude Code
+    /// session and Claude creates the script + registers the hook.
+    private var integrationsSetupInstructions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button(action: {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    isIntegrationsSetupInstructionsExpanded.toggle()
+                }
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: isIntegrationsSetupInstructionsExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .frame(width: 10)
+                    Text("Setup instructions")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(DS.Colors.textPrimary)
+                }
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+
+            if isIntegrationsSetupInstructionsExpanded {
+                Text("Copy the prompt below and paste it into Claude Code. It will create the hook script, make it executable, and register it in ~/.claude/settings.json for you.")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ScrollView(.vertical) {
+                    Text(ChatSettingsView.clickyClaudeCodeSetupPrompt)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(maxHeight: 220)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.black.opacity(0.25))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
+
+                HStack {
+                    Spacer()
+                    if !integrationsCopyFeedback.isEmpty {
+                        Text(integrationsCopyFeedback)
+                            .font(.system(size: 11))
+                            .foregroundColor(DS.Colors.textTertiary)
+                            .transition(.opacity)
+                    }
+                    Button(action: copyClickyClaudeCodeSetupPrompt) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("Copy prompt")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.white.opacity(0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                        )
+                        .foregroundColor(DS.Colors.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                }
+            }
+        }
+    }
+
+    private func copyClickyClaudeCodeSetupPrompt() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(ChatSettingsView.clickyClaudeCodeSetupPrompt, forType: .string)
+        withAnimation(.easeOut(duration: 0.2)) {
+            integrationsCopyFeedback = "Copied"
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            withAnimation(.easeOut(duration: 0.2)) {
+                integrationsCopyFeedback = ""
+            }
+        }
+    }
+
+    /// Prompt the user pastes into Claude Code to install the Stop hook.
+    /// Kept as a static constant so it's easy to update in one place when
+    /// the hook script changes.
+    static let clickyClaudeCodeSetupPrompt: String = """
+    Set up the Clicky TTS integration for Claude Code on macOS.
+
+    1. Create the directory `~/.claude/hooks/` if it doesn't exist, then write this file to `~/.claude/hooks/clicky-speak.sh`:
+
+    ```bash
+    #!/bin/bash
+    # Clicky Claude Code TTS hook
+    # Reads the last assistant message from the Stop-hook payload and pipes
+    # it to the Clicky app via the clicky://speak?file=<path> URL scheme.
+    INPUT=$(cat)
+    TEXT=$(HOOK_INPUT="$INPUT" python3 <<'PY'
+    import json, os, sys
+    try:
+        payload = json.loads(os.environ.get("HOOK_INPUT", ""))
+    except Exception:
+        sys.exit(0)
+    def from_transcript(path):
+        try:
+            with open(path, "r") as f:
+                lines = f.readlines()
+        except OSError:
+            return ""
+        for line in reversed(lines):
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            if entry.get("type") != "assistant":
+                continue
+            content = (entry.get("message") or {}).get("content") or []
+            parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+            return "\\n\\n".join(p for p in parts if p).strip()
+        return ""
+    text = (payload.get("last_assistant_message") or "").strip()
+    if not text:
+        text = from_transcript(payload.get("transcript_path", "")).strip()
+    if text:
+        if len(text) > 50000:
+            text = text[:50000] + "... (truncated)"
+        print(text)
+    PY
+    )
+    [ -z "$TEXT" ] && exit 0
+    TMPFILE="/tmp/clicky-$(uuidgen).txt"
+    printf '%s' "$TEXT" > "$TMPFILE"
+    open "clicky://speak?file=$TMPFILE" 2>/dev/null
+    exit 0
+    ```
+
+    2. Make it executable: `chmod +x ~/.claude/hooks/clicky-speak.sh`
+
+    3. Register the hook in `~/.claude/settings.json`. If the file already exists, merge — do NOT overwrite existing keys or other hooks. Add this entry to `hooks.Stop` (creating the arrays if missing):
+
+    ```json
+    {
+      "hooks": {
+        "Stop": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "bash ~/.claude/hooks/clicky-speak.sh"
+              }
+            ]
+          }
+        ]
+      }
+    }
+    ```
+
+    Notes:
+    - The `Stop` entry uses the nested `hooks` array format. There is no `async` field — Claude Code runs hooks directly.
+    - No restart needed. The hook fires on the next assistant response.
+    - Clicky must be running with "Auto-Play Claude Code" enabled in Settings → General → Integrations.
+    """
 
     // MARK: - Reusable Components
 

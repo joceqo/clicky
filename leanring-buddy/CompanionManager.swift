@@ -258,6 +258,17 @@ final class CompanionManager: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "isActionsMasterEnabled")
     }
 
+    /// Whether Clicky should read Claude Code assistant replies aloud when
+    /// it receives a `clicky://speak` URL from the Stop hook. Off by default
+    /// — the hook is wired on the user's machine but nothing plays until
+    /// they opt in from Settings → General → Integrations.
+    @Published var isAutoPlayClaudeCodeEnabled: Bool = UserDefaults.standard.object(forKey: "isAutoPlayClaudeCodeEnabled") as? Bool ?? false
+
+    func setAutoPlayClaudeCodeEnabled(_ enabled: Bool) {
+        isAutoPlayClaudeCodeEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isAutoPlayClaudeCodeEnabled")
+    }
+
     /// Whether Claude can silently log topics to the learning store via [LOG:] tags.
     /// Toggling off stops new entries from being written; existing entries are untouched.
     @Published var isLearningLogEnabled: Bool = UserDefaults.standard.object(forKey: "isLearningLogEnabled") as? Bool ?? true
@@ -597,6 +608,13 @@ final class CompanionManager: ObservableObject {
     /// Extracts the frontmost app's visible text (AX API with Vision OCR fallback)
     /// when the ⌃⇧L read-aloud shortcut is pressed.
     private let readAloudTextExtractor = TextExtractor()
+
+    /// Per-app outcome cache so the read-aloud pipeline can skip the AX
+    /// tree-walk for apps we've observed return nothing useful (Chrome,
+    /// Electron, VS Code, etc.). Updated on every trigger with the
+    /// observed strategy outcome; falls back to "try AX first" for
+    /// unseen apps.
+    private let appExtractionHeuristicsStore = AppExtractionHeuristicsStore()
 
     /// The in-flight read-aloud extract+speak task. Used so a second ⌃⇧L press
     /// cancels the first one instead of queueing another utterance.
@@ -2113,6 +2131,10 @@ final class CompanionManager: ObservableObject {
     /// hook uses this via the `clicky://` URL scheme. Runs the same
     /// markdown/code cleanup as chat responses.
     func speakExternalText(_ text: String) {
+        guard isAutoPlayClaudeCodeEnabled else {
+            print("🔇 Clicky: clicky://speak received but Auto-Play Claude Code is off — ignoring")
+            return
+        }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         Task { @MainActor in
@@ -2216,16 +2238,34 @@ final class CompanionManager: ObservableObject {
 
             do {
                 let extractionIntervalState = readAloudSignposter.beginInterval("TextExtraction", id: signpostID)
-                // Pass the trigger cursor point so OCR fallback picks the
-                // real window the user was looking at — skipping Clicky's
-                // own windows and screen-wide helper overlays (layer > 150 +
-                // ≥90% coverage).
-                let extractionResult = try await self.readAloudTextExtractor.extract(underCursor: readTriggerCursorPoint)
+                // Skip AX entirely for apps we've observed return nothing
+                // useful from the Accessibility tree (Chrome, Electron,
+                // etc.). Saves the 50–200ms AX walk cost on every trigger.
+                // Cache entries age out after 5 minutes so transient AX
+                // breakage doesn't lock us onto OCR forever.
+                let shouldSkipAX = self.appExtractionHeuristicsStore.shouldSkipAccessibility(
+                    forBundleID: foregroundAppBundleID
+                )
+                if shouldSkipAX {
+                    readAloudLogger.info("skipping AX for \(foregroundAppBundleID ?? "?", privacy: .public) — per-app heuristics mark it AX-useless")
+                }
+                let extractionResult = try await self.readAloudTextExtractor.extract(
+                    underCursor: readTriggerCursorPoint,
+                    skipAccessibility: shouldSkipAX
+                )
                 let extractionDurationSeconds = Date().timeIntervalSince(readTriggerTimestamp)
                 let wordsWithNonZeroBounds = extractionResult.words.filter { $0.screenBounds != .zero }.count
                 readAloudSignposter.endInterval("TextExtraction", extractionIntervalState,
                     "source=\(String(describing: extractionResult.source)) words=\(extractionResult.words.count) withBounds=\(wordsWithNonZeroBounds) durationS=\(String(format: "%.2f", extractionDurationSeconds))")
                 readAloudLogger.info("extraction: source=\(String(describing: extractionResult.source), privacy: .public) words=\(extractionResult.words.count, privacy: .public) withBounds=\(wordsWithNonZeroBounds, privacy: .public) durationS=\(String(format: "%.2f", extractionDurationSeconds), privacy: .public)")
+                // Record the observed outcome so the next trigger on this
+                // app benefits from what we just learned.
+                self.appExtractionHeuristicsStore.recordExtractionOutcome(
+                    bundleID: foregroundAppBundleID,
+                    source: extractionResult.source,
+                    wordCount: extractionResult.words.count,
+                    wordsWithBounds: wordsWithNonZeroBounds
+                )
 
                 if Task.isCancelled {
                     self.deleteReadAloudConversationIfEmpty(conversationID: conversationIDForSave)
@@ -2236,29 +2276,62 @@ final class CompanionManager: ObservableObject {
                     }
                     return
                 }
-                // If fromCursorPoint mode and the full extraction has zero words with
-                // usable screen bounds, fall back to a focused OCR crop (640×320pt)
-                // centered on the cursor. All words in the crop result are physically
-                // close to the cursor so anchoring is trivially accurate — the nearest-word
-                // search finds the right line immediately without scanning the whole document.
-                // This covers AX-only apps that don't expose kAXBoundsForRangeParameterizedAttribute.
+                // Cursor-anchored fast path: in fromCursorPoint mode, try a
+                // focused crop around the cursor BEFORE falling back on a
+                // full-window OCR. The crop is ~10× faster on cluttered
+                // displays and covers the common case of "read the paragraph
+                // I'm looking at". We only escalate to full-window OCR if
+                // the crop returned too little content (< minimumCropWords)
+                // or if OCR words cluster at the crop's bottom edge
+                // (bottomEdgeOverflow > threshold), which signals content
+                // continues below the crop.
+                //
+                // Trigger the crop path when either:
+                //   - the full extraction produced zero words with bounds
+                //     (classic AX-only-no-geometry case: Chrome, Electron)
+                //   - OR the mode is fromCursorPoint and the full extraction
+                //     gave us > 2× what a focused crop is likely to need;
+                //     running the smaller crop is cheaper and gives tighter
+                //     anchoring since all words are near the cursor.
+                let minimumCropWordsWithBounds = 50
+                let maximumCropBottomOverflow = 5
+                let fullExtractionHasAnyBounds = extractionResult.words.contains(where: { $0.screenBounds != .zero })
+                let shouldTryCursorCropFirst = self.readAloudReadMode == "fromCursorPoint"
+                    && (!fullExtractionHasAnyBounds || extractionResult.source == .ocr)
+
                 let effectiveExtractionResult: ScreenTextExtractionResult
-                if self.readAloudReadMode == "fromCursorPoint",
-                   !extractionResult.words.contains(where: { $0.screenBounds != .zero }) {
+                if shouldTryCursorCropFirst {
                     readAloudSignposter.emitEvent("FocusedCropFallback", id: signpostID,
                         "cursor=(\(String(format: "%.0f", readTriggerCursorPoint.x)),\(String(format: "%.0f", readTriggerCursorPoint.y)))")
-                    readAloudLogger.info("fromCursorPoint: full extraction has no usable bounds — trying focused crop OCR")
+                    readAloudLogger.info("fromCursorPoint: trying focused cursor crop first (fast path)")
                     let cropIntervalState = readAloudSignposter.beginInterval("FocusedCropOCR", id: signpostID)
-                    if let cropResult = try? await self.readAloudTextExtractor.extractViaOCRAroundPoint(readTriggerCursorPoint),
-                       cropResult.words.contains(where: { $0.screenBounds != .zero }) {
+                    let cropResultTuple = try? await self.readAloudTextExtractor.extractViaCursorCrop(
+                        cursorPoint: readTriggerCursorPoint
+                    )
+                    if let cropResultTuple {
+                        let cropResult = cropResultTuple.extraction
                         let cropWordsWithBounds = cropResult.words.filter { $0.screenBounds != .zero }.count
+                        let cropIsSufficient = cropWordsWithBounds >= minimumCropWordsWithBounds
+                            && cropResultTuple.bottomEdgeOverflow <= maximumCropBottomOverflow
                         readAloudSignposter.endInterval("FocusedCropOCR", cropIntervalState,
-                            "words=\(cropResult.words.count) withBounds=\(cropWordsWithBounds) chars=\(cropResult.fullText.count)")
-                        readAloudLogger.info("focused crop OCR: words=\(cropResult.words.count, privacy: .public) withBounds=\(cropWordsWithBounds, privacy: .public) chars=\(cropResult.fullText.count, privacy: .public)")
-                        effectiveExtractionResult = cropResult
+                            "words=\(cropResult.words.count) withBounds=\(cropWordsWithBounds) overflow=\(cropResultTuple.bottomEdgeOverflow) sufficient=\(cropIsSufficient)")
+                        readAloudLogger.info("focused crop OCR: words=\(cropResult.words.count, privacy: .public) withBounds=\(cropWordsWithBounds, privacy: .public) bottomEdgeOverflow=\(cropResultTuple.bottomEdgeOverflow, privacy: .public) sufficient=\(cropIsSufficient, privacy: .public)")
+                        if cropIsSufficient {
+                            effectiveExtractionResult = cropResult
+                        } else if fullExtractionHasAnyBounds {
+                            // Full extraction had real content — prefer it
+                            // over a clipped crop so we don't lose context.
+                            readAloudLogger.info("focused crop insufficient — keeping the full extraction we already have")
+                            effectiveExtractionResult = extractionResult
+                        } else {
+                            // Neither path has usable bounds; keep whichever
+                            // has more words (full extraction usually does).
+                            readAloudLogger.notice("neither crop nor full extraction has usable bounds — using full extraction")
+                            effectiveExtractionResult = extractionResult
+                        }
                     } else {
-                        readAloudSignposter.endInterval("FocusedCropOCR", cropIntervalState, "noBounds — using full extraction")
-                        readAloudLogger.notice("focused crop OCR also gave no bounds — falling back to full extraction from top")
+                        readAloudSignposter.endInterval("FocusedCropOCR", cropIntervalState, "failed")
+                        readAloudLogger.notice("focused crop OCR failed — using full extraction")
                         effectiveExtractionResult = extractionResult
                     }
                 } else {
