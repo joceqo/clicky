@@ -106,8 +106,8 @@ enum MusicController {
             )
         }
 
-        makeSystemDefinedEvent(data1: keyDownData1)?.cgEvent?.post(tap: .cgHidEventTap)
-        makeSystemDefinedEvent(data1: keyUpData1)?.cgEvent?.post(tap: .cgHidEventTap)
+        makeSystemDefinedEvent(data1: keyDownData1)?.cgEvent?.post(tap: .cghidEventTap)
+        makeSystemDefinedEvent(data1: keyUpData1)?.cgEvent?.post(tap: .cghidEventTap)
 
         print("🎵 MusicController: sent media key \(keyCode) (\(actionNameForKeyCode(keyCode)))")
     }

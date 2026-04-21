@@ -13,6 +13,7 @@
 		C25D88DC2F8E1B20008ECA05 /* onnxruntime in Frameworks */ = {isa = PBXBuildFile; productRef = C25D88DB2F8E1B20008ECA05 /* onnxruntime */; };
 		C25D88DE2F8E1B20008ECA05 /* onnxruntime_extensions in Frameworks */ = {isa = PBXBuildFile; productRef = C25D88DD2F8E1B20008ECA05 /* onnxruntime_extensions */; };
 		C25D88E12F8E1B45008ECA05 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = C25D88E02F8E1B45008ECA05 /* FluidAudio */; };
+		C2C99BC52F8FD0860083A428 /* MacAutomation in Frameworks */ = {isa = PBXBuildFile; productRef = C2C99BC42F8FD0860083A428 /* MacAutomation */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -64,6 +65,7 @@
 				C25D88DE2F8E1B20008ECA05 /* onnxruntime_extensions in Frameworks */,
 				C255A9D52F8E99F400330D8F /* SwiftGrab in Frameworks */,
 				C25D88E12F8E1B45008ECA05 /* FluidAudio in Frameworks */,
+				C2C99BC52F8FD0860083A428 /* MacAutomation in Frameworks */,
 				C25D88DC2F8E1B20008ECA05 /* onnxruntime in Frameworks */,
 				AA00BB032F6500030039DA55 /* Sparkle in Frameworks */,
 				AA00BB062F6500060039DA55 /* PostHog in Frameworks */,
@@ -133,6 +135,7 @@
 				C25D88DD2F8E1B20008ECA05 /* onnxruntime_extensions */,
 				C25D88E02F8E1B45008ECA05 /* FluidAudio */,
 				C255A9D42F8E99F400330D8F /* SwiftGrab */,
+				C2C99BC42F8FD0860083A428 /* MacAutomation */,
 			);
 			productName = "leanring-buddy";
 			productReference = 28F22CBF2F56440300A0FC59 /* Clicky.app */;
@@ -222,6 +225,7 @@
 				C25D88DA2F8E1B20008ECA05 /* XCRemoteSwiftPackageReference "onnxruntime-swift-package-manager" */,
 				C25D88DF2F8E1B45008ECA05 /* XCRemoteSwiftPackageReference "FluidAudio" */,
 				C255A9D32F8E99F400330D8F /* XCRemoteSwiftPackageReference "swift-grab" */,
+				C2C99BC32F8FD0860083A428 /* XCRemoteSwiftPackageReference "mac-automation" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 28F22CC02F56440300A0FC59 /* Products */;
@@ -655,6 +659,14 @@
 				kind = branch;
 			};
 		};
+		C2C99BC32F8FD0860083A428 /* XCRemoteSwiftPackageReference "mac-automation" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/joceqo/mac-automation.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -687,6 +699,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = C25D88DF2F8E1B45008ECA05 /* XCRemoteSwiftPackageReference "FluidAudio" */;
 			productName = FluidAudio;
+		};
+		C2C99BC42F8FD0860083A428 /* MacAutomation */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C2C99BC32F8FD0860083A428 /* XCRemoteSwiftPackageReference "mac-automation" */;
+			productName = MacAutomation;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

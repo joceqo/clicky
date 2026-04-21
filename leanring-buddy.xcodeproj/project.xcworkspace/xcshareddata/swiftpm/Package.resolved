@@ -1,5 +1,5 @@
 {
-  "originHash" : "ce38dc4ef90ee3d4a688093acae712f5300a9d940caed7bf6fa0305d03c0f18e",
+  "originHash" : "60242893ffe6ba88ab42024db09b777fa864568286fa0362f480b2d6b9ef09f8",
   "pins" : [
     {
       "identity" : "fluidaudio",
@@ -8,6 +8,15 @@
       "state" : {
         "branch" : "main",
         "revision" : "4ef33f0b64837c2943e8cd0f66940d5861176d6a"
+      }
+    },
+    {
+      "identity" : "mac-automation",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/joceqo/mac-automation.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "d5cc2a82591ceaca01181e7055bda598d0052812"
       }
     },
     {

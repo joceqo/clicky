@@ -10,6 +10,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import MacAutomation
 import PostHog
 import ScreenCaptureKit
 import SwiftUI
@@ -240,14 +241,6 @@ final class CompanionManager: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "isShortcutActionEnabled")
     }
 
-    /// Whether Claude can create macOS reminders via [REMIND:] tags.
-    @Published var isRemindActionEnabled: Bool = UserDefaults.standard.object(forKey: "isRemindActionEnabled") as? Bool ?? true
-
-    func setRemindActionEnabled(_ enabled: Bool) {
-        isRemindActionEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isRemindActionEnabled")
-    }
-
     /// Whether Claude can control music playback via [MUSIC:] tags.
     /// Uses media key simulation — works with Spotify, Apple Music, YouTube, etc.
     @Published var isMusicActionEnabled: Bool = UserDefaults.standard.object(forKey: "isMusicActionEnabled") as? Bool ?? true
@@ -264,6 +257,114 @@ final class CompanionManager: ObservableObject {
     func setClickActionEnabled(_ enabled: Bool) {
         isClickActionEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "isClickActionEnabled")
+    }
+
+    /// Whether the global ⌥⌘R shortcut reads the frontmost app's visible text
+    /// aloud via the currently selected TTS provider. When off the shortcut is
+    /// still detected but ignored — so users can reclaim the keys if they clash
+    /// with another app.
+    @Published var isReadAloudShortcutEnabled: Bool = UserDefaults.standard.object(forKey: "isReadAloudShortcutEnabled") as? Bool ?? true
+
+    func setReadAloudShortcutEnabled(_ enabled: Bool) {
+        isReadAloudShortcutEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isReadAloudShortcutEnabled")
+    }
+
+    /// Whether Claude can create notes in Apple Notes via [NOTE:] tags.
+    /// Toggling this on fires a lightweight AppleScript to trigger the macOS
+    /// Automation permission dialog if it hasn't been granted yet.
+    @Published var isAppleNotesEnabled: Bool = UserDefaults.standard.object(forKey: "isAppleNotesEnabled") as? Bool ?? false
+
+    func setAppleNotesEnabled(_ enabled: Bool) {
+        isAppleNotesEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isAppleNotesEnabled")
+
+        if enabled {
+            requestAppleNotesAutomationPermission()
+        }
+    }
+
+    /// Whether an alert should be shown prompting the user to grant Apple Notes
+    /// Automation permission in System Settings.
+    @Published var showAppleNotesPermissionAlert: Bool = false
+
+    /// Fires a test AppleScript on the main thread to trigger the macOS Automation
+    /// permission dialog. The dialog only appears on the first attempt — if the user
+    /// previously denied it, shows a fallback alert with a System Settings link.
+    private func requestAppleNotesAutomationPermission() {
+        // Must run on main thread for the TCC dialog to appear as a sheet
+        let testScript = """
+        tell application "Notes"
+            get name of default account
+        end tell
+        """
+        var errorInfo: NSDictionary?
+        guard let script = NSAppleScript(source: testScript) else { return }
+        script.executeAndReturnError(&errorInfo)
+
+        if let errorInfo {
+            let errorNumber = errorInfo[NSAppleScript.errorNumber] as? Int
+            print("⚠️ Apple Notes permission check failed: \(errorInfo)")
+            // -1743 = "Not authorized to send Apple events"
+            if errorNumber == -1743 {
+                showAppleNotesPermissionAlert = true
+            }
+        } else {
+            print("✅ Apple Notes automation permission granted")
+        }
+    }
+
+    /// Opens System Settings → Privacy & Security → Automation.
+    func openAutomationSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Whether Claude can create notes in Obsidian via [NOTE:] tags (when Obsidian is the target).
+    /// No permissions required — Obsidian vaults are plain folders on disk.
+    @Published var isObsidianEnabled: Bool = UserDefaults.standard.object(forKey: "isObsidianEnabled") as? Bool ?? false
+
+    /// The name of the Obsidian vault to use for note creation. Auto-detected from Obsidian's config.
+    @Published var selectedObsidianVaultPath: String = UserDefaults.standard.string(forKey: "selectedObsidianVaultPath") ?? ""
+
+    func setObsidianEnabled(_ enabled: Bool) {
+        isObsidianEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isObsidianEnabled")
+
+        // Auto-detect vault on first enable
+        if enabled && selectedObsidianVaultPath.isEmpty {
+            let vaults = ObsidianManager.listVaults()
+            if let firstVault = vaults.first {
+                selectedObsidianVaultPath = firstVault.path
+                UserDefaults.standard.set(firstVault.path, forKey: "selectedObsidianVaultPath")
+                print("📓 Obsidian: auto-selected vault \"\(firstVault.name)\" at \(firstVault.path)")
+            }
+        }
+    }
+
+    func setSelectedObsidianVaultPath(_ path: String) {
+        selectedObsidianVaultPath = path
+        UserDefaults.standard.set(path, forKey: "selectedObsidianVaultPath")
+    }
+
+    /// The shared RemindersManager instance from MacAutomation.
+    private lazy var remindersManager = RemindersManager()
+
+    /// Whether Claude can create reminders via [REMIND:] tags using EventKit.
+    /// Toggling this on requests EventKit access (one-time system dialog).
+    @Published var isRemindActionEnabled: Bool = UserDefaults.standard.object(forKey: "isRemindActionEnabled") as? Bool ?? true
+
+    func setRemindActionEnabled(_ enabled: Bool) {
+        isRemindActionEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isRemindActionEnabled")
+
+        if enabled {
+            Task {
+                let granted = await remindersManager.requestAccess()
+                print(granted ? "✅ Reminders access granted" : "⚠️ Reminders access denied")
+            }
+        }
     }
 
     // MARK: - Daily review notification settings
@@ -398,8 +499,17 @@ final class CompanionManager: ObservableObject {
 
     private var shortcutTransitionCancellable: AnyCancellable?
     private var modelCycleCancellable: AnyCancellable?
+    private var readAloudToggleCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
+
+    /// Extracts the frontmost app's visible text (AX API with Vision OCR fallback)
+    /// when the ⌥⌘R read-aloud shortcut is pressed.
+    private let readAloudTextExtractor = TextExtractor()
+
+    /// The in-flight read-aloud extract+speak task. Used so a second ⌥⌘R press
+    /// cancels the first one instead of queueing another utterance.
+    private var readAloudCurrentTask: Task<Void, Never>?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     /// Scheduled hide for transient cursor mode — cancelled if the user
@@ -937,6 +1047,9 @@ final class CompanionManager: ObservableObject {
         elevenLabsTTSClient.stopPlayback()
         supertonicTTSClient.stopPlayback()
         shortcutTransitionCancellable?.cancel()
+        readAloudToggleCancellable?.cancel()
+        readAloudCurrentTask?.cancel()
+        readAloudCurrentTask = nil
         voiceStateCancellable?.cancel()
         audioPowerCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
@@ -1115,6 +1228,13 @@ final class CompanionManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in
                 self?.cycleToNextModel()
+            }
+
+        readAloudToggleCancellable = globalPushToTalkShortcutMonitor
+            .readAloudTogglePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.toggleReadAloudOfFrontmostApp()
             }
     }
 
@@ -1388,8 +1508,10 @@ final class CompanionManager: ObservableObject {
                 // parser doesn't need to see), then run all remaining action tags through
                 // the unified ActionTagParser in one pass.
                 let chatNoteResult = Self.parseAndStripNoteTags(from: fullResponseText)
-                for note in chatNoteResult.notes {
-                    createAppleNote(title: note.title, content: note.content)
+                if isAppleNotesEnabled || isObsidianEnabled {
+                    for note in chatNoteResult.notes {
+                        createNote(title: note.title, content: note.content)
+                    }
                 }
 
                 let chatActionResult = ActionTagParser.parse(from: chatNoteResult.textWithNotesStripped)
@@ -1614,8 +1736,10 @@ final class CompanionManager: ObservableObject {
                 // action tags through ActionTagParser in one pass, then parse POINT
                 // from the fully-cleaned text so coordinates aren't mis-parsed.
                 let voiceNoteResult = Self.parseAndStripNoteTags(from: fullResponseText)
-                for note in voiceNoteResult.notes {
-                    createAppleNote(title: note.title, content: note.content)
+                if isAppleNotesEnabled {
+                    for note in voiceNoteResult.notes {
+                        createNote(title: note.title, content: note.content)
+                    }
                 }
 
                 let voiceActionResult = ActionTagParser.parse(from: voiceNoteResult.textWithNotesStripped)
@@ -1858,6 +1982,54 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    // MARK: - Read Aloud (⌥⌘R)
+
+    /// Toggles read-aloud of the frontmost app's visible text.
+    ///
+    /// Behavior:
+    ///   - If TTS is currently speaking (from a voice response or a previous
+    ///     read-aloud), stop it and do nothing else. Second tap = cancel.
+    ///   - Otherwise, extract text from the frontmost app via the Accessibility
+    ///     API (Vision OCR fallback for Chrome/Electron) and speak it via the
+    ///     currently selected TTS backend (ElevenLabs or Supertonic).
+    ///
+    /// Runs completely independently of push-to-talk: no dictation, no LLM
+    /// round-trip, no conversation history. The frontmost app is evaluated at
+    /// the moment of the keypress so the panel dismissal still reads whatever
+    /// the user was last looking at.
+    func toggleReadAloudOfFrontmostApp() {
+        guard isReadAloudShortcutEnabled else { return }
+
+        if isActiveTTSPlaying || readAloudCurrentTask != nil {
+            readAloudCurrentTask?.cancel()
+            readAloudCurrentTask = nil
+            stopActiveTTSPlayback()
+            return
+        }
+
+        readAloudCurrentTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let extractionResult = try await self.readAloudTextExtractor.extract()
+                let textToSpeak = extractionResult.fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !textToSpeak.isEmpty else {
+                    print("[ReadAloud] No text found in frontmost app")
+                    self.readAloudCurrentTask = nil
+                    return
+                }
+                if Task.isCancelled {
+                    self.readAloudCurrentTask = nil
+                    return
+                }
+                print("[ReadAloud] Speaking \(textToSpeak.count) chars via \(self.selectedTTSProvider) (source: \(extractionResult.source))")
+                try await self.speakTextWithActiveTTSProvider(textToSpeak)
+            } catch {
+                print("⚠️ Read-aloud error: \(error)")
+            }
+            self.readAloudCurrentTask = nil
+        }
+    }
+
     // MARK: - Test Helpers
 
     /// Tests the Anthropic API key by sending a minimal request to Claude.
@@ -2032,46 +2204,47 @@ final class CompanionManager: ObservableObject {
         return NoteActionResult(textWithNotesStripped: strippedText, notes: extractedNotes)
     }
 
-    /// Creates a new note in Apple Notes via AppleScript.
-    /// Runs on a background thread so it never blocks the UI or TTS playback.
-    /// The title stays on one line; newlines in the content become AppleScript
-    /// `& return &` concatenations since AppleScript strings can't span lines.
-    func createAppleNote(title: String, content: String) {
-        // Escape backslashes and double-quotes for embedding in AppleScript string literals.
-        let escapedTitle = title
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: " ") // titles are single-line
+    /// Uses NSDataDetector to extract a Date from a natural-language hint like
+    /// "tomorrow 9am" or "next Friday at 3pm". Returns nil if no date is found.
+    static func parseDate(from hint: String) -> Date? {
+        guard let detector = try? NSDataDetector(
+            types: NSTextCheckingResult.CheckingType.date.rawValue
+        ) else { return nil }
+        let range = NSRange(hint.startIndex..., in: hint)
+        return detector.matches(in: hint, range: range).first?.date
+    }
 
-        let escapedContent = content
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            // AppleScript string literals can't contain literal newlines —
-            // break them into concatenated strings joined by `return`.
-            .replacingOccurrences(of: "\n", with: "\" & return & \"")
-
-        let appleScriptSource = """
-        tell application "Notes"
-            make new note at folder "Notes" with properties {name:"\(escapedTitle)", body:"\(escapedContent)"}
-        end tell
-        """
-
-        // NSAppleScript.executeAndReturnError is synchronous and can take up to
-        // a second while Notes processes the request. Dispatch to a background
-        // queue to keep the main actor (and TTS playback) unblocked.
-        DispatchQueue.global(qos: .utility).async {
-            var errorInfo: NSDictionary?
-            guard let script = NSAppleScript(source: appleScriptSource) else {
-                print("⚠️ Apple Notes: failed to create NSAppleScript for note \"\(title)\"")
-                return
+    /// Creates a note using the active note integration (Apple Notes or Obsidian).
+    /// Dispatches to MacAutomation's AppleNotesManager or ObsidianManager based on
+    /// which toggles are enabled. If both are on, creates in both.
+    func createNote(title: String, content: String) {
+        if isAppleNotesEnabled {
+            Task {
+                let result = await AppleNotesManager.createNote(title: title, body: content)
+                switch result {
+                case .success:
+                    print("📝 Apple Note created: \"\(title)\"")
+                case .failure(let error):
+                    print("⚠️ Apple Notes creation failed for \"\(title)\": \(error)")
+                }
             }
-            script.executeAndReturnError(&errorInfo)
-            if let errorInfo {
-                print("⚠️ Apple Notes creation failed for \"\(title)\": \(errorInfo)")
+        }
+
+        if isObsidianEnabled, !selectedObsidianVaultPath.isEmpty {
+            let vault = ObsidianVault(
+                name: (selectedObsidianVaultPath as NSString).lastPathComponent,
+                path: selectedObsidianVaultPath
+            )
+            let created = ObsidianManager.createNote(
+                title: title,
+                content: content,
+                in: vault,
+                openInObsidian: false
+            )
+            if created != nil {
+                print("📓 Obsidian note created: \"\(title)\"")
             } else {
-                print("📝 Apple Note created: \"\(title)\"")
+                print("⚠️ Obsidian note creation failed for \"\(title)\"")
             }
         }
     }
@@ -2116,11 +2289,22 @@ final class CompanionManager: ObservableObject {
             }
         }
 
-        // Reminders via EventKit — async, runs in background, only when the toggle is on
+        // Reminders via MacAutomation's EventKit manager — only when the toggle is on
         if isRemindActionEnabled {
             for reminder in actions.reminders {
                 Task {
-                    await ActionExecutor.createReminder(text: reminder.text, dateHint: reminder.dateHint)
+                    let parsedDate = Self.parseDate(from: reminder.dateHint)
+                    let newReminder = NewReminder(
+                        title: reminder.text,
+                        dueDate: parsedDate,
+                        dueDateHasTime: parsedDate != nil
+                    )
+                    let created = await remindersManager.createReminder(newReminder)
+                    if let created {
+                        print("⏰ Reminder created: \"\(created.title)\"" + (parsedDate.map { " due \($0)" } ?? ""))
+                    } else {
+                        print("⚠️ Failed to create reminder: \"\(reminder.text)\"")
+                    }
                 }
             }
         }
@@ -2204,8 +2388,8 @@ final class CompanionManager: ObservableObject {
             return
         }
 
-        mouseDown.post(tap: .cgHidEventTap)
-        mouseUp.post(tap: .cgHidEventTap)
+        mouseDown.post(tap: .cghidEventTap)
+        mouseUp.post(tap: .cghidEventTap)
 
         // Move the cursor overlay to the click target for visual confirmation,
         // exactly like [POINT:] does. This shows the user where Clicky clicked.

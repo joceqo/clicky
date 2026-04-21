@@ -38,7 +38,7 @@ enum ActionExecutor {
         // NSWorkspace.openApplication requires the bundle URL, so we use
         // a Launch Services search via the app name.
         let lowercased = target.lowercased()
-        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIDForCommonApp(lowercased))
+        if let appURL = bundleIDForCommonApp(lowercased).flatMap({ NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) })
             ?? findAppByName(target) {
             NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
             print("🚀 Opened app: \(target)")

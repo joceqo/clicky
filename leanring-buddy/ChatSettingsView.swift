@@ -10,21 +10,22 @@
 //  • General — model, TTS voice, STT speech, API keys
 //
 
+import MacAutomation
 import SwiftUI
 import UniformTypeIdentifiers
 
 /// Which tab is currently active in the settings view.
 private enum SettingsTab: String, CaseIterable {
+    case general  = "General"
     case profile  = "Profile"
     case learning = "Learning"
-    case general  = "General"
 }
 
 struct ChatSettingsView: View {
     @ObservedObject var companionManager: CompanionManager
     let onDismiss: () -> Void
 
-    @State private var selectedTab: SettingsTab = .profile
+    @State private var selectedTab: SettingsTab = .general
 
     // General tab state
     @State private var apiKeyInput = ""
@@ -76,6 +77,20 @@ struct ChatSettingsView: View {
             profileGoals = savedProfile.goals
             profileAdditionalContext = savedProfile.additionalContext
             learningEntries = companionManager.learningLogStore.loadAllEntries().reversed()
+        }
+        .alert(
+            "Apple Notes Permission",
+            isPresented: $companionManager.showAppleNotesPermissionAlert
+        ) {
+            Button("Open System Settings") {
+                companionManager.openAutomationSettings()
+            }
+            Button("Cancel", role: .cancel) {
+                companionManager.isAppleNotesEnabled = false
+                UserDefaults.standard.set(false, forKey: "isAppleNotesEnabled")
+            }
+        } message: {
+            Text("Clicky needs Automation permission to create notes in Apple Notes.\n\nOpen System Settings → Privacy & Security → Automation, find Clicky, and enable Notes.")
         }
     }
 
@@ -228,6 +243,7 @@ struct ChatSettingsView: View {
             TextEditor(text: text)
                 .font(.system(size: 12))
                 .foregroundColor(DS.Colors.textPrimary)
+                .tint(DS.Colors.textSecondary)
                 .scrollContentBackground(.hidden)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 4)
@@ -1011,7 +1027,7 @@ struct ChatSettingsView: View {
 
                 actionToggleRow(
                     label: "Create reminders",
-                    hint: "Execute [REMIND:] tags via Reminders.app",
+                    hint: "Execute [REMIND:] tags via EventKit — requires Reminders permission",
                     isOn: Binding(
                         get: { companionManager.isRemindActionEnabled },
                         set: { companionManager.setRemindActionEnabled($0) }
@@ -1043,8 +1059,78 @@ struct ChatSettingsView: View {
                         set: { companionManager.setClickActionEnabled($0) }
                     )
                 )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Read aloud (⌥⌘R)",
+                    hint: "Reads the frontmost app's visible text via the selected TTS provider. Tap again to stop.",
+                    isOn: Binding(
+                        get: { companionManager.isReadAloudShortcutEnabled },
+                        set: { companionManager.setReadAloudShortcutEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Save to Apple Notes",
+                    hint: "Create notes via [NOTE:] tags — requires Automation permission for Notes",
+                    isOn: Binding(
+                        get: { companionManager.isAppleNotesEnabled },
+                        set: { companionManager.setAppleNotesEnabled($0) }
+                    )
+                )
+
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.vertical, 2)
+
+                actionToggleRow(
+                    label: "Save to Obsidian",
+                    hint: "Create markdown notes in your Obsidian vault via [NOTE:] tags",
+                    isOn: Binding(
+                        get: { companionManager.isObsidianEnabled },
+                        set: { companionManager.setObsidianEnabled($0) }
+                    )
+                )
+
+                // Show vault picker when Obsidian is enabled
+                if companionManager.isObsidianEnabled {
+                    obsidianVaultPicker
+                }
             }
         }
+    }
+
+    /// Picker for selecting which Obsidian vault to save notes into.
+    private var obsidianVaultPicker: some View {
+        let vaults = ObsidianManager.listVaults()
+        return HStack(spacing: 8) {
+            Text("Vault")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textTertiary)
+
+            Picker("", selection: Binding(
+                get: { companionManager.selectedObsidianVaultPath },
+                set: { companionManager.setSelectedObsidianVaultPath($0) }
+            )) {
+                if vaults.isEmpty {
+                    Text("No vaults found").tag("")
+                }
+                ForEach(vaults, id: \.path) { vault in
+                    Text(vault.name).tag(vault.path)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.leading, 4)
+        .padding(.vertical, 2)
     }
 
     private func actionToggleRow(label: String, hint: String, isOn: Binding<Bool>) -> some View {

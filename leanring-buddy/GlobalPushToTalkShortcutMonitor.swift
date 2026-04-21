@@ -16,6 +16,9 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     let shortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
     /// Fires once per ⌃M key-down. Used to cycle the active LLM model globally.
     let modelCyclePublisher = PassthroughSubject<Void, Never>()
+    /// Fires once per ⌥⌘R key-down. Used to toggle read-aloud of the frontmost
+    /// app's visible text. Tap-once semantics (no hold required).
+    let readAloudTogglePublisher = PassthroughSubject<Void, Never>()
 
     private var globalEventTap: CFMachPort?
     private var globalEventTapRunLoopSource: CFRunLoopSource?
@@ -122,6 +125,21 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         {
             print("[ModelCycler] Global ⌃M detected")
             modelCyclePublisher.send()
+            return Unmanaged.passUnretained(event)
+        }
+
+        // ⌥⌘R (keycode 15) — toggle read-aloud of the frontmost app on key-down only.
+        // Fires exactly once per press, independent of push-to-talk state.
+        let rKeyCode: UInt16 = 15
+        if eventType == .keyDown
+            && eventKeyCode == rKeyCode
+            && event.flags.contains(.maskCommand)
+            && event.flags.contains(.maskAlternate)
+            && !event.flags.contains(.maskControl)
+            && !event.flags.contains(.maskShift)
+        {
+            print("[ReadAloud] Global ⌥⌘R detected")
+            readAloudTogglePublisher.send()
             return Unmanaged.passUnretained(event)
         }
 

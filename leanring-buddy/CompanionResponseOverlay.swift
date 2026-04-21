@@ -194,13 +194,13 @@ private struct CompanionResponseOverlayView: View {
     @ObservedObject var viewModel: CompanionResponseOverlayViewModel
 
     var body: some View {
-        if viewModel.isShowingResponse {
-            Text(viewModel.streamingResponseText.isEmpty ? "..." : viewModel.streamingResponseText)
+        if viewModel.isShowingResponse && !viewModel.streamingResponseText.isEmpty {
+            Text(viewModel.streamingResponseText)
                 .font(.system(size: 13, weight: .regular))
                 .foregroundColor(DS.Colors.textPrimary)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 300, alignment: .leading)
+                .frame(minWidth: 140, maxWidth: 300, alignment: .leading)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .background(
