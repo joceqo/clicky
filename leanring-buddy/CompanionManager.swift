@@ -159,7 +159,11 @@ final class CompanionManager: ObservableObject {
         return ReadAloudHighlightOverlayManager()
     }()
     private lazy var readAloudTextPopoverOverlayManager: ReadAloudTextPopoverOverlayManager = {
-        return ReadAloudTextPopoverOverlayManager()
+        let manager = ReadAloudTextPopoverOverlayManager()
+        // Seed with the persisted display mode so the first popover shown
+        // this session already uses the user's preferred layout.
+        manager.setDisplayMode(self.readAloudPopoverDisplayMode)
+        return manager
     }()
 
     /// On-device LLM client via Apple Intelligence (FoundationModels).
@@ -370,6 +374,23 @@ final class CompanionManager: ObservableObject {
         if style != "popover" {
             readAloudTextPopoverOverlayManager.hide()
         }
+    }
+
+    /// How the read-aloud popover lays out its text. Only consulted when the
+    /// highlight style is "popover".
+    /// - "window": legacy compact window — shows ~110 chars of context around
+    ///   the current word. Fast to scan but drops surrounding paragraphs.
+    /// - "paragraph": shows the sentence group surrounding the current word
+    ///   (current + one before + one after). Reads like prose.
+    /// - "fullScroll": shows the entire extracted text in a larger panel and
+    ///   auto-scrolls so the highlighted word stays visible. Preserves all
+    ///   context at the cost of a bigger on-screen footprint.
+    @Published var readAloudPopoverDisplayMode: String = UserDefaults.standard.string(forKey: "readAloudPopoverDisplayMode") ?? "window"
+
+    func setReadAloudPopoverDisplayMode(_ mode: String) {
+        readAloudPopoverDisplayMode = mode
+        UserDefaults.standard.set(mode, forKey: "readAloudPopoverDisplayMode")
+        readAloudTextPopoverOverlayManager.setDisplayMode(mode)
     }
 
     /// Whether Claude can create notes in Apple Notes via [NOTE:] tags.
@@ -616,6 +637,11 @@ final class CompanionManager: ObservableObject {
     /// unseen apps.
     private let appExtractionHeuristicsStore = AppExtractionHeuristicsStore()
 
+    /// Persistent JSONL log of every read-aloud session. Survives app
+    /// restarts and OS log rotation so I can come back days later and diff
+    /// "what worked" vs "what didn't" across apps and extraction strategies.
+    private let readAloudSessionLogStore = ReadAloudSessionLogStore()
+
     /// The in-flight read-aloud extract+speak task. Used so a second ⌃⇧L press
     /// cancels the first one instead of queueing another utterance.
     private var readAloudCurrentTask: Task<Void, Never>?
@@ -655,6 +681,23 @@ final class CompanionManager: ObservableObject {
     /// Includes both voice (push-to-talk) and text (typed) exchanges so the
     /// chat window shows the full session history regardless of input method.
     @Published var chatMessages: [ChatMessage] = []
+
+    /// Small in-memory cache of recently-loaded conversations so switching back
+    /// and forth between a handful of chats is instant — without this, every
+    /// sidebar click triggers a synchronous JSON decode on the main thread,
+    /// which gets noticeably janky once a conversation has many messages.
+    /// Only stores non-active conversations (the active one lives in
+    /// `chatMessages`). Populated on switch-away and on async load completion.
+    private var conversationMessagesCache: [UUID: [ChatMessage]] = [:]
+    /// LRU order for `conversationMessagesCache`. Most recent at the end.
+    private var conversationMessagesCacheOrder: [UUID] = []
+    /// Maximum number of conversations kept in the messages cache.
+    private let conversationMessagesCacheCapacity = 5
+
+    /// Tracks the async load currently filling `chatMessages` for a freshly
+    /// switched-to conversation. Held so a rapid second switch can cancel the
+    /// previous load before it overwrites the new conversation's state.
+    private var inFlightConversationLoadTask: Task<Void, Never>?
 
     /// True while a text-chat message is being sent and Claude is streaming a
     /// response. Used by ChatView to disable the send button and show the
@@ -946,15 +989,28 @@ final class CompanionManager: ObservableObject {
     /// Switches to a different conversation, saving the current one first.
     /// Rebuilds the API conversation history from the loaded messages so
     /// Claude has context within the new conversation.
+    ///
+    /// Fast path: when the target conversation is in the messages cache (from
+    /// a previous visit this session), apply it synchronously so the sidebar
+    /// click feels instant. Cache miss: clear the chat view, kick off an async
+    /// load on a background queue, and populate `chatMessages` when it finishes.
+    /// This keeps the main thread free of JSON decode work during the switch.
     func switchToConversation(_ conversationID: UUID) {
         guard conversationID != activeConversationID else { return }
         guard !isSendingChatMessage else { return }
 
+        // Cancel any still-running load for a previous switch so it doesn't
+        // arrive late and overwrite the conversation we're now moving to.
+        inFlightConversationLoadTask?.cancel()
+        inFlightConversationLoadTask = nil
+
         // Save current conversation in the background so it doesn't block the
-        // switch. Capture the messages and ID before mutating state.
+        // switch. Capture the messages and ID before mutating state. Also
+        // cache the outgoing messages in memory so switching back is instant.
         let previousMessages = chatMessages
         let previousID = activeConversationID
         if let previousID {
+            cacheConversationMessages(previousID, messages: previousMessages)
             Task.detached(priority: .utility) { [conversationStore, conversations] in
                 conversationStore.saveMessages(previousMessages, for: previousID)
                 conversationStore.saveConversationsIndex(conversations)
@@ -962,11 +1018,59 @@ final class CompanionManager: ObservableObject {
         }
 
         activeConversationID = conversationID
-        chatMessages = conversationStore.loadMessages(for: conversationID)
 
-        // Rebuild the in-memory API context from the loaded messages so Claude
-        // has conversational context within this conversation (not cross-conversation)
-        rebuildConversationHistoryFromChatMessages()
+        // Cache hit: apply immediately. Remove the new active conversation
+        // from the cache because it now lives in `chatMessages` again.
+        if let cachedMessages = conversationMessagesCache[conversationID] {
+            conversationMessagesCache.removeValue(forKey: conversationID)
+            conversationMessagesCacheOrder.removeAll { $0 == conversationID }
+            chatMessages = cachedMessages
+            rebuildConversationHistoryFromChatMessages()
+            return
+        }
+
+        // Cache miss: clear the chat view right away so the user doesn't see
+        // messages from the previous conversation lingering while we load.
+        chatMessages = []
+        conversationHistory = []
+
+        // Load off the main thread. Decoding a conversation with many messages
+        // and long assistant responses can take tens of milliseconds of sync
+        // work; on main that shows up as a perceptible hitch during the switch.
+        inFlightConversationLoadTask = Task { [weak self, conversationStore] in
+            let loadedMessages: [ChatMessage] = await Task.detached(priority: .userInitiated) {
+                conversationStore.loadMessages(for: conversationID)
+            }.value
+
+            guard let self else { return }
+            if Task.isCancelled { return }
+            // Ignore results for a conversation the user has since switched away from.
+            guard self.activeConversationID == conversationID else { return }
+
+            self.chatMessages = loadedMessages
+            self.rebuildConversationHistoryFromChatMessages()
+            self.inFlightConversationLoadTask = nil
+        }
+    }
+
+    /// Stores `messages` in the conversation messages cache under `conversationID`,
+    /// promotes the entry to most-recently-used, and evicts the oldest entries
+    /// once the cache exceeds its capacity.
+    private func cacheConversationMessages(_ conversationID: UUID, messages: [ChatMessage]) {
+        conversationMessagesCache[conversationID] = messages
+        conversationMessagesCacheOrder.removeAll { $0 == conversationID }
+        conversationMessagesCacheOrder.append(conversationID)
+        while conversationMessagesCacheOrder.count > conversationMessagesCacheCapacity {
+            let evictedConversationID = conversationMessagesCacheOrder.removeFirst()
+            conversationMessagesCache.removeValue(forKey: evictedConversationID)
+        }
+    }
+
+    /// Removes a conversation from the messages cache. Called when a conversation
+    /// is deleted so its stale messages can't be served on a future switch.
+    private func invalidateCachedConversationMessages(_ conversationID: UUID) {
+        conversationMessagesCache.removeValue(forKey: conversationID)
+        conversationMessagesCacheOrder.removeAll { $0 == conversationID }
     }
 
     /// Creates a new empty conversation, prepends it to the sidebar list,
@@ -982,7 +1086,13 @@ final class CompanionManager: ObservableObject {
         if let activeID = activeConversationID, chatMessages.isEmpty {
             conversationStore.deleteConversation(id: activeID)
             conversations.removeAll { $0.id == activeID }
+            invalidateCachedConversationMessages(activeID)
         } else {
+            // Cache the outgoing conversation in memory so the user can jump
+            // back to it from the sidebar without waiting on a JSON decode.
+            if let activeID = activeConversationID {
+                cacheConversationMessages(activeID, messages: chatMessages)
+            }
             saveActiveConversationToDisk()
         }
 
@@ -1001,6 +1111,7 @@ final class CompanionManager: ObservableObject {
     func deleteConversation(_ conversationID: UUID) {
         conversationStore.deleteConversation(id: conversationID)
         conversations.removeAll { $0.id == conversationID }
+        invalidateCachedConversationMessages(conversationID)
         conversationStore.saveConversationsIndex(conversations)
 
         if conversationID == activeConversationID {
@@ -1034,8 +1145,16 @@ final class CompanionManager: ObservableObject {
     /// Auto-titles a conversation from the first user message if the title
     /// is still the default "New Chat".
     private func autoTitleActiveConversationIfNeeded(from userText: String) {
-        guard let activeID = activeConversationID,
-              let conversationIndex = conversations.firstIndex(where: { $0.id == activeID }),
+        guard let activeID = activeConversationID else { return }
+        autoTitleConversationIfNeeded(conversationID: activeID, from: userText)
+    }
+
+    /// Auto-titles a specific conversation from `userText` if its title is still
+    /// the default "New Chat". Extracted so the read-aloud pipeline can title a
+    /// conversation captured at session-start time even if the user has since
+    /// switched away.
+    private func autoTitleConversationIfNeeded(conversationID: UUID, from userText: String) {
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }),
               conversations[conversationIndex].title == "New Chat"
         else { return }
 
@@ -1056,6 +1175,30 @@ final class CompanionManager: ObservableObject {
         }
 
         conversations[conversationIndex].title = title
+    }
+
+    /// Auto-titles a read-aloud conversation as "AppName — <excerpt>" so the
+    /// sidebar shows something meaningful instead of every read-aloud chat
+    /// stacking up as "New Chat". Falls back to just the excerpt when no app
+    /// name is available, or just the app name when the excerpt is empty.
+    private func autoTitleReadAloudConversationIfNeeded(
+        conversationID: UUID,
+        foregroundAppName: String?,
+        readText: String
+    ) {
+        let trimmedReadText = readText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAppName = foregroundAppName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        let composedTitle: String
+        if !trimmedAppName.isEmpty && !trimmedReadText.isEmpty {
+            composedTitle = "\(trimmedAppName) — \(trimmedReadText)"
+        } else if !trimmedAppName.isEmpty {
+            composedTitle = trimmedAppName
+        } else {
+            composedTitle = trimmedReadText
+        }
+
+        autoTitleConversationIfNeeded(conversationID: conversationID, from: composedTitle)
     }
 
     /// Rebuilds the in-memory `conversationHistory` (used for Claude API context)
@@ -2235,6 +2378,21 @@ final class CompanionManager: ObservableObject {
             let frontmostApp = NSWorkspace.shared.frontmostApplication
             let foregroundAppBundleID = frontmostApp?.bundleIdentifier
             let foregroundAppName = frontmostApp?.localizedName
+            let foregroundWindowTitle = Self.frontmostWindowTitle(forProcessID: frontmostApp?.processIdentifier)
+
+            // Seed the persistent session-log builder. Fields fill in as the
+            // pipeline advances; at every exit below we call `build(outcome:)`
+            // and hand the record to `readAloudSessionLogStore` for disk write.
+            var sessionLogBuilder = ReadAloudSessionLogBuilder(
+                sessionID: sessionToken.uuidString,
+                triggeredAt: readTriggerTimestamp,
+                foregroundAppBundleID: foregroundAppBundleID,
+                foregroundAppName: foregroundAppName,
+                foregroundWindowTitle: foregroundWindowTitle,
+                popoverDisplayMode: self.readAloudPopoverDisplayMode,
+                highlightStyle: self.readAloudHighlightStyle,
+                readMode: self.readAloudReadMode
+            )
 
             do {
                 let extractionIntervalState = readAloudSignposter.beginInterval("TextExtraction", id: signpostID)
@@ -2246,6 +2404,7 @@ final class CompanionManager: ObservableObject {
                 let shouldSkipAX = self.appExtractionHeuristicsStore.shouldSkipAccessibility(
                     forBundleID: foregroundAppBundleID
                 )
+                sessionLogBuilder.skippedAccessibilityCache = shouldSkipAX
                 if shouldSkipAX {
                     readAloudLogger.info("skipping AX for \(foregroundAppBundleID ?? "?", privacy: .public) — per-app heuristics mark it AX-useless")
                 }
@@ -2255,6 +2414,15 @@ final class CompanionManager: ObservableObject {
                 )
                 let extractionDurationSeconds = Date().timeIntervalSince(readTriggerTimestamp)
                 let wordsWithNonZeroBounds = extractionResult.words.filter { $0.screenBounds != .zero }.count
+                sessionLogBuilder.extractionSource = {
+                    switch extractionResult.source {
+                    case .accessibility: return .accessibility
+                    case .ocr: return .ocr
+                    }
+                }()
+                sessionLogBuilder.extractedWordCount = extractionResult.words.count
+                sessionLogBuilder.extractedWordsWithBounds = wordsWithNonZeroBounds
+                sessionLogBuilder.extractionDurationSeconds = extractionDurationSeconds
                 readAloudSignposter.endInterval("TextExtraction", extractionIntervalState,
                     "source=\(String(describing: extractionResult.source)) words=\(extractionResult.words.count) withBounds=\(wordsWithNonZeroBounds) durationS=\(String(format: "%.2f", extractionDurationSeconds))")
                 readAloudLogger.info("extraction: source=\(String(describing: extractionResult.source), privacy: .public) words=\(extractionResult.words.count, privacy: .public) withBounds=\(wordsWithNonZeroBounds, privacy: .public) durationS=\(String(format: "%.2f", extractionDurationSeconds), privacy: .public)")
@@ -2268,6 +2436,7 @@ final class CompanionManager: ObservableObject {
                 )
 
                 if Task.isCancelled {
+                    self.readAloudSessionLogStore.append(sessionLogBuilder.build(outcome: .stoppedByUser))
                     self.deleteReadAloudConversationIfEmpty(conversationID: conversationIDForSave)
                     if self.activeReadAloudToken == sessionToken {
                         self.readAloudCurrentTask = nil
@@ -2301,6 +2470,7 @@ final class CompanionManager: ObservableObject {
 
                 let effectiveExtractionResult: ScreenTextExtractionResult
                 if shouldTryCursorCropFirst {
+                    sessionLogBuilder.cursorCropAttempted = true
                     readAloudSignposter.emitEvent("FocusedCropFallback", id: signpostID,
                         "cursor=(\(String(format: "%.0f", readTriggerCursorPoint.x)),\(String(format: "%.0f", readTriggerCursorPoint.y)))")
                     readAloudLogger.info("fromCursorPoint: trying focused cursor crop first (fast path)")
@@ -2313,11 +2483,15 @@ final class CompanionManager: ObservableObject {
                         let cropWordsWithBounds = cropResult.words.filter { $0.screenBounds != .zero }.count
                         let cropIsSufficient = cropWordsWithBounds >= minimumCropWordsWithBounds
                             && cropResultTuple.bottomEdgeOverflow <= maximumCropBottomOverflow
+                        sessionLogBuilder.cursorCropProducedText = !cropResult.fullText.isEmpty
                         readAloudSignposter.endInterval("FocusedCropOCR", cropIntervalState,
                             "words=\(cropResult.words.count) withBounds=\(cropWordsWithBounds) overflow=\(cropResultTuple.bottomEdgeOverflow) sufficient=\(cropIsSufficient)")
                         readAloudLogger.info("focused crop OCR: words=\(cropResult.words.count, privacy: .public) withBounds=\(cropWordsWithBounds, privacy: .public) bottomEdgeOverflow=\(cropResultTuple.bottomEdgeOverflow, privacy: .public) sufficient=\(cropIsSufficient, privacy: .public)")
                         if cropIsSufficient {
                             effectiveExtractionResult = cropResult
+                            sessionLogBuilder.extractionSource = .cursorCropOCR
+                            sessionLogBuilder.extractedWordCount = cropResult.words.count
+                            sessionLogBuilder.extractedWordsWithBounds = cropWordsWithBounds
                         } else if fullExtractionHasAnyBounds {
                             // Full extraction had real content — prefer it
                             // over a clipped crop so we don't lose context.
@@ -2330,6 +2504,7 @@ final class CompanionManager: ObservableObject {
                             effectiveExtractionResult = extractionResult
                         }
                     } else {
+                        sessionLogBuilder.cursorCropProducedText = false
                         readAloudSignposter.endInterval("FocusedCropOCR", cropIntervalState, "failed")
                         readAloudLogger.notice("focused crop OCR failed — using full extraction")
                         effectiveExtractionResult = extractionResult
@@ -2369,6 +2544,13 @@ final class CompanionManager: ObservableObject {
                 let textToSpeak = extractedTextResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !textToSpeak.isEmpty else {
                     readAloudLogger.notice("no text found in frontmost app after cursor slicing")
+                    sessionLogBuilder.endToEndLatencySeconds = Date().timeIntervalSince(readTriggerTimestamp)
+                    let emptyTextError = NSError(
+                        domain: "Clicky.ReadAloud",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "no text found in frontmost app after cursor slicing"]
+                    )
+                    self.readAloudSessionLogStore.append(sessionLogBuilder.build(outcome: .error, error: emptyTextError))
                     self.deleteReadAloudConversationIfEmpty(conversationID: conversationIDForSave)
                     if self.activeReadAloudToken == sessionToken {
                         self.readAloudCurrentTask = nil
@@ -2379,6 +2561,10 @@ final class CompanionManager: ObservableObject {
                 }
                 let detectedLanguageCode = Self.detectDominantLanguageCode(for: textToSpeak)
                 self.lastReadAloudDetectedLanguageCode = detectedLanguageCode
+                sessionLogBuilder.characterCount = textToSpeak.count
+                sessionLogBuilder.detectedLanguageCode = detectedLanguageCode
+                sessionLogBuilder.textLooksLikeCode = ReadAloudSessionQualityHeuristics.textLooksLikeCode(textToSpeak)
+                sessionLogBuilder.spokenTextExcerpt = ReadAloudSessionQualityHeuristics.spokenTextExcerpt(textToSpeak)
                 readAloudLogger.info("speaking \(textToSpeak.count, privacy: .public) chars via Kokoro (source: \(String(describing: extractionResult.source), privacy: .public))")
                 readAloudLogger.info("detected language: \(detectedLanguageCode, privacy: .public)")
                 // Foreground app + head/tail previews so OCR misreads
@@ -2426,6 +2612,17 @@ final class CompanionManager: ObservableObject {
                 )
                 self.chatMessages.append(placeholderMessage)
 
+                // Auto-title the conversation this read-aloud session belongs to
+                // using "AppName — excerpt" so the sidebar stops stacking up
+                // "New Chat" rows for every ⌃⇧L press.
+                if let conversationIDForTitle = conversationIDForSave {
+                    self.autoTitleReadAloudConversationIfNeeded(
+                        conversationID: conversationIDForTitle,
+                        foregroundAppName: foregroundAppName,
+                        readText: textToSpeak
+                    )
+                }
+
                 // Kick off JPEG compression for the captured screenshots on a
                 // background thread immediately — ConversationStore.saveCompressedScreenshots
                 // is documented as background-thread safe and takes ~1s per session.
@@ -2449,6 +2646,7 @@ final class CompanionManager: ObservableObject {
                 // ranges — which were computed against the original text and
                 // are used by the highlight follow-along.
                 let textForSynthesis = Self.neutralizeEmojiForTTS(in: textToSpeak)
+                let synthesisStartTimestamp = Date()
                 let synthesisIntervalState = readAloudSignposter.beginInterval("KokoroSynthesis", id: signpostID,
                     "chars=\(textForSynthesis.count)")
                 let captureResult = try await self.kokoroTTSClient.speakTextWithWordTimings(textForSynthesis) { [weak self] wordTiming in
@@ -2456,9 +2654,18 @@ final class CompanionManager: ObservableObject {
                     self.handleReadAloudWordStarted(wordTiming, wordsOnScreen: wordsOnScreen)
                 }
                 let endToEndLatencySeconds = Date().timeIntervalSince(readTriggerTimestamp)
+                let synthesisDurationSeconds = Date().timeIntervalSince(synthesisStartTimestamp)
+                let renderedAudioDurationSeconds = captureResult.audioSamples.isEmpty
+                    ? 0.0
+                    : Double(captureResult.audioSamples.count) / captureResult.sampleRate
                 readAloudSignposter.endInterval("KokoroSynthesis", synthesisIntervalState,
-                    "words=\(captureResult.wordTimings.count) durationS=\(String(format: "%.1f", captureResult.audioSamples.isEmpty ? 0 : Double(captureResult.audioSamples.count)/captureResult.sampleRate))")
+                    "words=\(captureResult.wordTimings.count) durationS=\(String(format: "%.1f", renderedAudioDurationSeconds))")
                 readAloudLogger.info("session complete: chars=\(textToSpeak.count, privacy: .public) words=\(captureResult.wordTimings.count, privacy: .public) endToEndS=\(String(format: "%.2f", endToEndLatencySeconds), privacy: .public)")
+                sessionLogBuilder.charactersSynthesized = textForSynthesis.count
+                sessionLogBuilder.wordsSpoken = captureResult.wordTimings.count
+                sessionLogBuilder.synthesisDurationSeconds = synthesisDurationSeconds
+                sessionLogBuilder.audioDurationSeconds = renderedAudioDurationSeconds
+                sessionLogBuilder.endToEndLatencySeconds = endToEndLatencySeconds
 
                 // Collect screenshot filenames now — the background compression
                 // task has had the entire synthesis duration to complete.
@@ -2500,6 +2707,18 @@ final class CompanionManager: ObservableObject {
                     screenshotFrames: screenshotFrames
                 )
 
+                // Measure how well the on-screen highlight actually tracked
+                // the spoken words. Low coverage usually means the extractor
+                // returned word-level text but no geometry (common with
+                // Chrome/Electron AX trees that give us strings but no
+                // bounds), which shows up in the overlay as the yellow
+                // rectangle floating somewhere wrong for the whole session.
+                let spokenWordsWithNonZeroBounds = savedWordTimings.filter { $0.screenBounds != .zero }.count
+                sessionLogBuilder.highlightCoverageFraction = ReadAloudSessionQualityHeuristics.highlightCoverageFraction(
+                    spokenWordCount: savedWordTimings.count,
+                    spokenWordsWithBoundsCount: spokenWordsWithNonZeroBounds
+                )
+
                 if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == readAloudMessageID }) {
                     self.chatMessages[messageIndex].readAloudCapture = capture
                 }
@@ -2517,6 +2736,7 @@ final class CompanionManager: ObservableObject {
                         self.conversationStore.saveMessages(originalMessages, for: saveID)
                     }
                 }
+                self.readAloudSessionLogStore.append(sessionLogBuilder.build(outcome: .played))
             } catch is CancellationError {
                 // User tapped the shortcut again mid-flight; this is a stop,
                 // not a failure. Keep the text message in the conversation so
@@ -2525,16 +2745,25 @@ final class CompanionManager: ObservableObject {
                 // The shared model download keeps running in the background so
                 // the next press lands on a warm cache.
                 readAloudLogger.info("stopped by user (download continues in background if still in progress)")
+                sessionLogBuilder.endToEndLatencySeconds = sessionLogBuilder.endToEndLatencySeconds
+                    ?? Date().timeIntervalSince(readTriggerTimestamp)
+                self.readAloudSessionLogStore.append(sessionLogBuilder.build(outcome: .stoppedByUser))
                 self.preserveStoppedReadAloudPlaceholder(messageID: readAloudMessageID, conversationID: conversationIDForSave)
             } catch let nsError as NSError where nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
                 // URLSession-level cancellation also originates from a user stop.
                 readAloudLogger.info("stopped by user (download continues in background if still in progress)")
+                sessionLogBuilder.endToEndLatencySeconds = sessionLogBuilder.endToEndLatencySeconds
+                    ?? Date().timeIntervalSince(readTriggerTimestamp)
+                self.readAloudSessionLogStore.append(sessionLogBuilder.build(outcome: .stoppedByUser, error: nsError))
                 self.preserveStoppedReadAloudPlaceholder(messageID: readAloudMessageID, conversationID: conversationIDForSave)
             } catch {
                 // Genuine pipeline failure — discard the placeholder and the
                 // read-aloud-only conversation so the sidebar doesn't leak an
                 // empty entry the user can't play back.
                 readAloudLogger.error("error: \(String(describing: error), privacy: .public)")
+                sessionLogBuilder.endToEndLatencySeconds = sessionLogBuilder.endToEndLatencySeconds
+                    ?? Date().timeIntervalSince(readTriggerTimestamp)
+                self.readAloudSessionLogStore.append(sessionLogBuilder.build(outcome: .error, error: error))
                 self.discardReadAloudOnError(messageID: readAloudMessageID, conversationID: conversationIDForSave)
             }
             self.readAloudHighlightOverlayManager.hide()
@@ -2780,6 +3009,32 @@ final class CompanionManager: ObservableObject {
         return dominantLanguage.rawValue
     }
 
+    /// Looks up the main window title of the process with `processID` by
+    /// walking the on-screen window list. Used solely for the read-aloud
+    /// session log so entries distinguish (e.g.) `VS Code — main.swift` from
+    /// `VS Code — README.md` without opening the file.
+    /// Requires Screen Recording permission for window names on macOS 12+
+    /// — we already have that permission when read-aloud is usable.
+    /// Filters to `kCGWindowLayer == 0` to skip menu bar / overlays.
+    private static func frontmostWindowTitle(forProcessID processID: pid_t?) -> String? {
+        guard let processID else { return nil }
+        let windowListOptions = CGWindowListOption(arrayLiteral: .optionOnScreenOnly, .excludeDesktopElements)
+        guard let windowInfoArray = CGWindowListCopyWindowInfo(windowListOptions, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        for windowInfo in windowInfoArray {
+            guard let ownerProcessIDNumber = windowInfo[kCGWindowOwnerPID as String] as? NSNumber,
+                  ownerProcessIDNumber.int32Value == processID else { continue }
+            let windowLayer = (windowInfo[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+            guard windowLayer == 0 else { continue }
+            if let title = windowInfo[kCGWindowName as String] as? String,
+               !title.trimmingCharacters(in: .whitespaces).isEmpty {
+                return title
+            }
+        }
+        return nil
+    }
+
     /// Fires each time Kokoro starts playing the next word, and once with
     /// `nil` when playback ends. Drives the live highlight overlay using the
     /// same union-bounds logic we persist into the capture — keeping the
@@ -2833,6 +3088,17 @@ final class CompanionManager: ObservableObject {
     /// Exposed so the chat card's ▶ Play button can flip its glyph without
     /// owning the controller directly.
     @Published private(set) var isAudioOnlyReplayPlayingMessageID: UUID?
+
+    /// Re-displays the floating text popover overlay with the full extracted
+    /// text of a past read-aloud message. No audio, no live highlight — just
+    /// the static text rendered using the user's current popover layout
+    /// (compact / paragraph / full scroll). Useful when the reader wants to
+    /// re-read a captured passage without triggering a new read-aloud.
+    func showReadAloudTextPopoverOverlay(for message: ChatMessage) {
+        let trimmedContent = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedContent.isEmpty else { return }
+        readAloudTextPopoverOverlayManager.show(fullText: message.content)
+    }
 
     /// Opens the replay popover for a captured read-aloud message, showing
     /// the screenshot from when the read happened with a highlight rectangle

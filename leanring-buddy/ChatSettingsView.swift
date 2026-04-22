@@ -1057,6 +1057,32 @@ struct ChatSettingsView: View {
                             .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
                     )
                 }
+
+                // Only the popover highlight style is affected by the display
+                // mode below — hide the extra row when it wouldn't do anything.
+                if companionManager.readAloudHighlightStyle == "popover" {
+                    HStack {
+                        Text("Popover layout")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(DS.Colors.textSecondary)
+
+                        Spacer()
+
+                        HStack(spacing: 0) {
+                            readAloudPopoverDisplayModeOptionButton(label: "Compact", modeID: "window")
+                            readAloudPopoverDisplayModeOptionButton(label: "Paragraph", modeID: "paragraph")
+                            readAloudPopoverDisplayModeOptionButton(label: "Full text", modeID: "fullScroll")
+                        }
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.white.opacity(0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                        )
+                    }
+                }
             }
         }
     }
@@ -1081,6 +1107,22 @@ struct ChatSettingsView: View {
         let isSelected = companionManager.readAloudHighlightStyle == styleID
         return Button(action: {
             companionManager.setReadAloudHighlightStyle(styleID)
+        }) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(isSelected ? DS.Colors.accent.opacity(0.4) : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    private func readAloudPopoverDisplayModeOptionButton(label: String, modeID: String) -> some View {
+        let isSelected = companionManager.readAloudPopoverDisplayMode == modeID
+        return Button(action: {
+            companionManager.setReadAloudPopoverDisplayMode(modeID)
         }) {
             Text(label)
                 .font(.system(size: 11, weight: .medium))
