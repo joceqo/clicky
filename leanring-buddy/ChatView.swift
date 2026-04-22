@@ -464,6 +464,7 @@ private struct ReadAloudMessageCardView: View {
     @State private var isTextExpanded: Bool = false
     @State private var isHoveringPlay: Bool = false
     @State private var isHoveringViewPopover: Bool = false
+    @State private var isHoveringShowTextPopover: Bool = false
     @State private var selectedScreenshotFileURL: URL? = nil
 
     private let collapsedTextLineLimit: Int = 3
@@ -583,6 +584,7 @@ private struct ReadAloudMessageCardView: View {
             if !message.screenshotFileNames.isEmpty {
                 viewPopoverButton
             }
+            showTextPopoverButton
             if let capture = message.readAloudCapture {
                 Text(formattedDurationText(capture.audioDurationSeconds))
                     .font(.system(size: 10))
@@ -671,6 +673,43 @@ private struct ReadAloudMessageCardView: View {
         .onHover { hovering in
             isHoveringViewPopover = hovering
             if hovering && message.readAloudCapture != nil {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+
+    /// Re-opens the lightweight floating text popover over the screen with
+    /// the saved read-aloud text. Independent of audio — the user can glance
+    /// at the passage again in whichever popover layout (compact / paragraph
+    /// / full scroll) they've chosen in Settings. Unlike `viewPopoverButton`,
+    /// this works even when the message has no screenshot captured.
+    private var showTextPopoverButton: some View {
+        Button(action: {
+            companionManager.showReadAloudTextPopoverOverlay(for: message)
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 10, weight: .bold))
+                Text("Popover")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundColor(DS.Colors.textPrimary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule().fill(
+                    isHoveringShowTextPopover
+                        ? DS.Colors.blue500.opacity(0.3)
+                        : Color.white.opacity(0.06)
+                )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHoveringShowTextPopover = hovering
+            if hovering {
                 NSCursor.pointingHand.push()
             } else {
                 NSCursor.pop()

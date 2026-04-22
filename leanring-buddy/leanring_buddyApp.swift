@@ -43,6 +43,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         ClickyAnalytics.configure()
         ClickyAnalytics.trackAppOpened()
 
+        registerURLSchemeHandler()
+
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         chatWindowController = ChatWindowController(companionManager: companionManager)
         companionManager.start()
@@ -79,6 +81,62 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
                 print("⚠️ Clicky: Failed to register as login item: \(error)")
             }
         }
+    }
+
+    /// Installs the `kAEGetURL` Apple Event handler so macOS delivers
+    /// `clicky://` URLs to us. The Claude Code Stop hook opens
+    /// `clicky://speak?file=<path>` (or `?text=<urlencoded>`) after each
+    /// assistant turn so Clicky can read the response aloud.
+    private func registerURLSchemeHandler() {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
+    }
+
+    @objc private func handleURLEvent(_ event: NSAppleEventDescriptor,
+                                       withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let urlString = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: urlString) else {
+            return
+        }
+        handleClickyURL(url)
+    }
+
+    /// Parses a `clicky://` URL and dispatches it. Currently only
+    /// `clicky://speak` is implemented. Two ways to pass the text:
+    /// `?text=<urlencoded>` for short strings, `?file=<absolute-path>` for
+    /// long strings that would blow past the URL length limit.
+    private func handleClickyURL(_ url: URL) {
+        guard url.scheme?.lowercased() == "clicky" else { return }
+        guard let action = url.host?.lowercased(), action == "speak" else {
+            print("⚠️ Clicky: unknown clicky:// action: \(url.host ?? "(none)")")
+            return
+        }
+
+        let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let fileParameter = queryItems.first(where: { $0.name == "file" })?.value
+        let textParameter = queryItems.first(where: { $0.name == "text" })?.value
+
+        let spokenText: String?
+        if let filePath = fileParameter, !filePath.isEmpty {
+            spokenText = try? String(contentsOfFile: filePath, encoding: .utf8)
+            // Opportunistic cleanup — the hook writes to /tmp and expects us
+            // to consume the file. Ignore errors; stale tmp files are harmless.
+            if spokenText != nil { try? FileManager.default.removeItem(atPath: filePath) }
+        } else if let inlineText = textParameter {
+            spokenText = inlineText
+        } else {
+            spokenText = nil
+        }
+
+        guard let textToSpeak = spokenText, !textToSpeak.isEmpty else {
+            print("⚠️ Clicky: clicky://speak received but no text to speak")
+            return
+        }
+        companionManager.speakExternalText(textToSpeak)
     }
 
     private func startSparkleUpdater() {
