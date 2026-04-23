@@ -46,30 +46,63 @@ This is the biggest architectural divide.
 
 **What Clicky already has that overlaps TipTour:**
 
-- AX rect resolution capability — `TextExtractor.swift:221` calls
-  `AXBoundsForRangeParameterizedAttribute` to get per-word rects. The
-  plumbing works; it's just wired to text extraction, not element pointing.
-- Cursor-to-rect animation — the bezier arc in `OverlayWindow.swift`
+Both of TipTour's primary building blocks have Clicky analogs — the pieces
+exist, they just aren't composed for element pointing.
+
+- **AX tree traversal** — `TextExtractor.swift` already walks the AX tree via
+  `AXUIElementCreateSystemWide` + `kAXChildrenAttribute` + `kAXTitleAttribute`
+  / `kAXValueAttribute`. Tuned for text, but the tree walk is generic.
+- **Element position + size via AX** — `WindowPositionManager.swift:214-215`
+  reads `kAXPositionAttribute` + `kAXSizeAttribute` on a window element. Same
+  API works on *any* AX element; this is exactly what TipTour's ~30 ms fast
+  path does.
+- **Per-word rects via AX** — `TextExtractor.swift:221` uses
+  `AXBoundsForRangeParameterizedAttribute` for text-range bounds.
+- **Cursor-to-rect animation** — bezier arc in `OverlayWindow.swift`
   (`.navigatingToTarget` → `.pointingAtTarget`). Coordinates come from Claude
-  vision today; swapping in AX-derived rects would be a feed change, not a
-  rewrite.
+  vision today; swapping in AX-derived rects is a feed change, not a rewrite.
+- **Vision framework OCR** — already a fallback in `TextExtractor.swift` for
+  AX-empty apps like Chrome/Electron (half of TipTour's YOLO+OCR combiner).
+- **On-device CoreML / ONNX model pattern** — FluidAudio/Parakeet (CoreML,
+  ~600 MB) and Supertonic (ONNX, ~200 MB) both auto-download from HuggingFace
+  and cache in `~/Library/Application Support/Clicky/models/`. Same pattern
+  drops onto a YOLO model.
 
-**What Clicky genuinely does not have:**
+**What Clicky is actually missing:**
 
-- **CoreML YOLO object detector.** For apps with custom/canvas rendering
-  (Blender, Unity, Figma canvas, many Electron apps) the AX tree is empty and
-  vision models need a deterministic fallback. TipTour ships a YOLO model
-  that runs on-device and returns UI-element bounding boxes; Vision OCR then
-  matches text inside those boxes. No equivalent in Clicky.
-- **Deterministic label→rect resolver.** Claude's `[POINT:x,y]` is a
-  best-effort vision guess — not guaranteed pixel-perfect. TipTour's pipeline
-  constrains the LLM to emit a *label* and resolves the rect in Swift.
+1. **A `resolve(label: String) → CGRect?` function** composed from the AX
+   primitives above. TipTour has this; Clicky doesn't. Implementation = walk
+   tree, fuzzy-match `kAXTitleAttribute` / `kAXDescriptionAttribute` /
+   `kAXValueAttribute` against the label, read `kAXPositionAttribute` +
+   `kAXSizeAttribute` on hit, return rect. One file; every API call needed
+   already has a working example in the repo.
+2. **A CoreML YOLO UI-element detector** as the AX-empty fallback. Clicky
+   can't currently point accurately in Blender / Unity / Figma canvas /
+   Electron apps. TipTour ships a YOLO model that returns UI-element bboxes,
+   then runs Vision OCR inside each box and matches the label. Clicky has
+   Vision OCR and the on-device model-loading pattern already — the missing
+   piece is the model itself + a ~100-line combiner.
+3. **Pipeline switch: labels instead of coordinates.** Today Clicky's prompt
+   asks Claude to emit `[POINT:x,y:label:screenN]` — pixel coordinates that
+   are a best-effort vision guess. Switching to `[POINT:label:screenN]` with
+   Swift doing the resolution (AX → YOLO+OCR → fallback) is the architectural
+   shift. That's a prompt change + resolver + wiring into `OverlayWindow`.
 
 **What Clicky does not have but is less critical:**
 
-- `ClickDetector` CGEventTap inside the resolved rect for auto-advance. This
-  only matters if Clicky adds multi-step workflow plans; today the model
-  sends one `[POINT]` per response, so there's no "next step" to advance to.
+- `ClickDetector` CGEventTap inside the resolved rect for auto-advance. Only
+  matters if Clicky adds multi-step workflow plans; today the model sends one
+  `[POINT]` per response, so there's no "next step" to advance to.
+
+**Effort summary (rough):**
+
+| Task | Effort | Blocker |
+|---|---|---|
+| AX `resolve(label) → CGRect` | small (~1 day) | none — all primitives in-repo |
+| AX-empty-tree cache per bundle ID | trivial | none |
+| CoreML YOLO + OCR combiner | medium (1–2 days) | need/pack a UI-element YOLO model |
+| Prompt switch coords → labels | small | none |
+| ClickDetector auto-advance | small | only useful with workflow plans |
 
 ### 2.2 Conversation model
 
