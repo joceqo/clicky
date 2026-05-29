@@ -72,13 +72,21 @@ final class CompanionManager: ObservableObject {
     /// through this so keys never ship in the app binary.
     private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
 
-    private lazy var claudeAPI: ClaudeAPI = {
-        return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
+    private lazy var brainClient: any BrainClient = {
+        ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
     }()
 
-    private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
-        return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
+    private lazy var ttsClient: any TTSClient = {
+        ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
     }()
+
+    /// Index of the phrase currently being spoken by TTS (into `currentResponsePhrases`).
+    /// Observed by BlueCursorView to highlight the active sentence in the response bubble.
+    @Published private(set) var currentlySpeakingPhraseIndex: Int? = nil
+
+    /// The full response text split into speakable phrases. Set when TTS playback begins
+    /// so the overlay can render all phrases and animate the active one.
+    @Published private(set) var currentResponsePhrases: [String] = []
 
     /// Conversation history so Claude remembers prior exchanges within a session.
     /// Each entry is the user's transcript and Claude's response.
@@ -113,7 +121,7 @@ final class CompanionManager: ObservableObject {
     func setSelectedModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
-        claudeAPI.model = model
+        brainClient.model = model
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -179,9 +187,9 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
-        // Eagerly touch the Claude API so its TLS warmup handshake completes
+        // Eagerly init the brain client so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
-        _ = claudeAPI
+        _ = brainClient
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
@@ -493,7 +501,9 @@ final class CompanionManager: ObservableObject {
 
             // Cancel any in-progress response and TTS from a previous utterance
             currentResponseTask?.cancel()
-            elevenLabsTTSClient.stopPlayback()
+            ttsClient.stopPlayback()
+            currentResponsePhrases = []
+            currentlySpeakingPhraseIndex = nil
             clearDetectedElementLocation()
 
             // Dismiss the onboarding prompt if it's showing
@@ -610,7 +620,7 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                let (fullResponseText, _) = try await brainClient.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: Self.companionVoiceResponseSystemPrompt,
                     conversationHistory: historyForAPI,
@@ -697,14 +707,26 @@ final class CompanionManager: ObservableObject {
 
                 ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 
-                // Play the response via TTS. Keep the spinner (processing state)
-                // until the audio actually starts playing, then switch to responding.
+                // Play the response via TTS phrase-by-phrase. Split the full response
+                // into sentences so we can highlight each one as it plays. voiceState
+                // switches to .responding before the first phrase so the triangle
+                // becomes visible and the phrase bubble appears.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     do {
-                        try await elevenLabsTTSClient.speakText(spokenText)
-                        // speakText returns after player.play() — audio is now playing
+                        let responsePhrases = TTSSentenceSplitter.splitIntoSentences(spokenText)
+                        currentResponsePhrases = responsePhrases
                         voiceState = .responding
+
+                        for (phraseIndex, phrase) in responsePhrases.enumerated() {
+                            guard !Task.isCancelled else { break }
+                            currentlySpeakingPhraseIndex = phraseIndex
+                            try await ttsClient.speakText(phrase)
+                        }
+
+                        currentlySpeakingPhraseIndex = nil
                     } catch {
+                        currentlySpeakingPhraseIndex = nil
+                        currentResponsePhrases = []
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
                         print("⚠️ ElevenLabs TTS error: \(error)")
                         speakCreditsErrorFallback()
@@ -719,6 +741,8 @@ final class CompanionManager: ObservableObject {
             }
 
             if !Task.isCancelled {
+                currentResponsePhrases = []
+                currentlySpeakingPhraseIndex = nil
                 voiceState = .idle
                 scheduleTransientHideIfNeeded()
             }
@@ -735,7 +759,7 @@ final class CompanionManager: ObservableObject {
         transientHideTask?.cancel()
         transientHideTask = Task {
             // Wait for TTS audio to finish playing
-            while elevenLabsTTSClient.isPlaying {
+            while ttsClient.isPlaying {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard !Task.isCancelled else { return }
             }
@@ -982,7 +1006,7 @@ final class CompanionManager: ObservableObject {
                 let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
                 let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
 
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                let (fullResponseText, _) = try await brainClient.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: Self.onboardingDemoSystemPrompt,
                     userPrompt: "look around my screen and find something interesting to point at",
