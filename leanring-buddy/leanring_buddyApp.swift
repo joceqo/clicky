@@ -34,6 +34,14 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Mirror stdout/stderr to a log file so logs are captured even when the
+        // app is launched via Finder/open (no terminal to inherit stdout). Then
+        // line-buffer so entries flush in real time. Read it at:
+        //   ~/Library/Logs/joceclicky.log
+        let logPath = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Logs/joceclicky.log")
+        freopen(logPath, "a", stdout)
+        freopen(logPath, "a", stderr)
+        setvbuf(stdout, nil, _IOLBF, 0)
         print("🎯 Clicky: Starting...")
         print("🎯 Clicky: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 

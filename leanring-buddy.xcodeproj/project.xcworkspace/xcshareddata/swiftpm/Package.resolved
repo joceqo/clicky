@@ -1,6 +1,15 @@
 {
-  "originHash" : "3c6fb67fefedcfcd00708e24ca8088151f21dccfc0ade32ea80c406646277e89",
+  "originHash" : "6b84da24876cd81178958dcab891abb62d4f46c289cf18ac131ec00df9a7665c",
   "pins" : [
+    {
+      "identity" : "permiso",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/zats/permiso",
+      "state" : {
+        "branch" : "main",
+        "revision" : "3012871b741f68b1b6f46e2e1936c422df703968"
+      }
+    },
     {
       "identity" : "plcrashreporter",
       "kind" : "remoteSourceControl",

@@ -76,6 +76,13 @@ final class AppleOCRBrainAdapter: BrainClient {
             screenText += "\n--- \(label) ---\n\(block)\n"
         }
 
+        // Apple Intelligence has a tiny ~4096-token context, so a text-heavy
+        // screen otherwise blows it (exceededContextWindowSize). Cap the OCR text.
+        let maxScreenChars = 6000
+        if screenText.count > maxScreenChars {
+            screenText = String(screenText.prefix(maxScreenChars)) + "\n…(screen text truncated)"
+        }
+
         let composedPrompt: String
         if screenText.isEmpty {
             composedPrompt = userPrompt + "\n\n(No readable text was found on screen.)"
@@ -83,9 +90,11 @@ final class AppleOCRBrainAdapter: BrainClient {
             composedPrompt = userPrompt + "\n\nText currently visible on the user's screen (extracted via OCR):\n" + screenText
         }
 
+        // Keep only the last couple of turns — replayed history also eats the
+        // small context window.
         return try await apfel.chat(
             systemPrompt: systemPrompt,
-            conversationHistory: conversationHistory,
+            conversationHistory: Array(conversationHistory.suffix(2)),
             userPrompt: composedPrompt
         )
     }
