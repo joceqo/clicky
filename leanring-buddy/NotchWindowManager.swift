@@ -2,38 +2,38 @@
 //  NotchWindowManager.swift
 //  leanring-buddy
 //
-//  Owns a borderless, non-activating NSPanel anchored under the hardware notch
-//  (top-center of the built-in display, below the menu bar). On displays without
-//  a notch it anchors top-center just below the menu bar. The panel hosts a
-//  SwiftUI shell (NotchRootView) via NSHostingView.
+//  Hosts the Notch shell inside a DynamicNotchKit `DynamicNotch`, Dynamic-Island
+//  style: a small COMPACT pill (the buddy triangle) sits in the notch, and
+//  hovering over it EXPANDS to the full NotchRootView panel. Moving the mouse
+//  away collapses it back to compact. DynamicNotchKit owns the window, notch
+//  detection, and the expand/collapse animation.
 //
-//  Mirrors the KeyablePanel pattern from MenuBarPanelManager so text fields can
-//  receive focus while the panel stays non-activating (does not steal focus from
-//  the user's current app). Repositions on screen-parameter changes.
+//  DynamicNotchKit's hover behaviors only keep-visible / haptic / shadow — they
+//  do NOT auto-expand — so we observe its published `isHovering` and drive
+//  expand()/compact() ourselves.
 //
-//  No private APIs: the notch is detected via NSScreen.safeAreaInsets /
-//  auxiliaryTopLeftArea (public AppKit), with a top-center fallback.
+//  Keeps the same public surface (configure / toggle / show / hide) the rest of
+//  the app already calls, so CompanionManager is unchanged.
 //
 
 import AppKit
+import Combine
+import DynamicNotchKit
 import SwiftUI
-
-/// NSPanel subclass that can become the key window even when borderless and
-/// non-activating, so embedded text fields can receive focus.
-private final class NotchKeyablePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-}
 
 @MainActor
 final class NotchWindowManager: NSObject {
     private weak var companionManager: CompanionManager?
-    private var panel: NSPanel?
-    private var screenParamsObserver: NSObjectProtocol?
+    private var notch: DynamicNotch<AnyView, AnyView, EmptyView>?
+    private var isShown = false
+    private var hoverCancellable: AnyCancellable?
 
-    private let panelWidth: CGFloat = 420
-    private let panelHeight: CGFloat = 320
-    /// Gap left on either side of the hardware notch so the panel tucks under it.
-    private let gapBelowMenuBar: CGFloat = 6
+    /// The screen carrying the menu bar (and the notch, if any).
+    private var notchScreen: NSScreen {
+        NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 })
+            ?? NSScreen.main
+            ?? NSScreen.screens[0]
+    }
 
     // MARK: - Wiring
 
@@ -41,136 +41,90 @@ final class NotchWindowManager: NSObject {
     /// CompanionManager after init (the manager is created before `self` exists).
     func configure(companionManager: CompanionManager) {
         self.companionManager = companionManager
-
-        if screenParamsObserver == nil {
-            screenParamsObserver = NotificationCenter.default.addObserver(
-                forName: NSApplication.didChangeScreenParametersNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.repositionIfVisible()
-                }
-            }
-        }
-    }
-
-    deinit {
-        if let observer = screenParamsObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
     }
 
     // MARK: - Public API
 
     func toggle() {
-        if let panel, panel.isVisible {
-            hide()
-        } else {
-            show()
-        }
+        if isShown { hide() } else { show() }
     }
 
+    /// Presents the notch in its compact (Dynamic-Island) state. Hovering it
+    /// expands to the full panel.
     func show() {
         guard let companionManager else { return }
-        if panel == nil {
-            createPanel(companionManager: companionManager)
+        if notch == nil {
+            build(companionManager: companionManager)
         }
-        positionPanel()
-        panel?.makeKeyAndOrderFront(nil)
-        panel?.orderFrontRegardless()
+        isShown = true
+        Task { await notch?.compact(on: notchScreen) }
     }
 
     func hide() {
-        panel?.orderOut(nil)
+        guard isShown else { return }
+        isShown = false
+        Task { await notch?.hide() }
     }
 
-    // MARK: - Panel Lifecycle
+    // MARK: - Build + hover-driven expand/compact
 
-    private func createPanel(companionManager: CompanionManager) {
-        let rootView = NotchRootView(companionManager: companionManager)
-            .frame(width: panelWidth)
-
-        let hostingView = NSHostingView(rootView: rootView)
-        hostingView.frame = NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight)
-        hostingView.wantsLayer = true
-        hostingView.layer?.backgroundColor = .clear
-
-        let notchPanel = NotchKeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
+    private func build(companionManager: CompanionManager) {
+        // `.auto` → notch style on notched Macs, floating otherwise.
+        // `.keepVisible` stops the panel from vanishing mid-hover while the user
+        // reaches into it; we drive expand/compact from `isHovering` below.
+        let dynamicNotch = DynamicNotch<AnyView, AnyView, EmptyView>(
+            hoverBehavior: [.keepVisible, .increaseShadow],
+            style: .auto,
+            expanded: {
+                AnyView(
+                    NotchRootView(companionManager: companionManager)
+                        .frame(width: 420)
+                )
+            },
+            compactLeading: {
+                AnyView(NotchCompactBuddy())
+            }
         )
+        notch = dynamicNotch
 
-        notchPanel.isFloatingPanel = true
-        notchPanel.level = .floating
-        notchPanel.isOpaque = false
-        notchPanel.backgroundColor = .clear
-        notchPanel.hasShadow = false
-        notchPanel.hidesOnDeactivate = false
-        notchPanel.isExcludedFromWindowsMenu = true
-        notchPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        notchPanel.isMovableByWindowBackground = false
-        notchPanel.titleVisibility = .hidden
-        notchPanel.titlebarAppearsTransparent = true
-
-        notchPanel.contentView = hostingView
-        panel = notchPanel
+        // Expand on hover, collapse back to compact on leave (Dynamic Island UX).
+        hoverCancellable = dynamicNotch.$isHovering
+            .removeDuplicates()
+            .sink { [weak self] hovering in
+                guard let self else { return }
+                Task { @MainActor in
+                    guard self.isShown, let notch = self.notch else { return }
+                    if hovering {
+                        await notch.expand(on: self.notchScreen)
+                    } else {
+                        await notch.compact(on: self.notchScreen)
+                    }
+                }
+            }
     }
+}
 
-    private func repositionIfVisible() {
-        guard let panel, panel.isVisible else { return }
-        positionPanel()
+/// The compact (collapsed) notch content: the buddy's little triangle, shown as
+/// a Dynamic-Island pill in the notch.
+private struct NotchCompactBuddy: View {
+    var body: some View {
+        NotchTriangle()
+            .fill(DS.Colors.accent)
+            .frame(width: 13, height: 11)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .accessibilityLabel("Clicky")
     }
+}
 
-    // MARK: - Positioning
-
-    /// The screen carrying the menu bar (and the notch, if any). On a notched
-    /// MacBook this is the built-in display.
-    private var notchScreen: NSScreen? {
-        // The screen at index 0 (or `.main`) owns the menu bar in the typical
-        // single-notch setup. Prefer the screen reporting a non-zero top safe
-        // area (the notch), else fall back to the main screen.
-        if let notched = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) {
-            return notched
-        }
-        return NSScreen.main ?? NSScreen.screens.first
-    }
-
-    private func positionPanel() {
-        guard let panel, let screen = notchScreen else { return }
-
-        let fittingSize = panel.contentView?.fittingSize
-            ?? CGSize(width: panelWidth, height: panelHeight)
-        let actualHeight = fittingSize.height
-
-        let visible = screen.visibleFrame   // excludes the menu bar
-        let full = screen.frame
-
-        // Horizontal center on the screen.
-        let originX = full.midX - (panelWidth / 2)
-
-        // The top edge to anchor under. With a notch, `auxiliaryTopLeftArea`
-        // (when available) gives the usable area below the menu bar; otherwise
-        // the visibleFrame's top already sits below the menu bar. We tuck the
-        // panel just under that line.
-        let topAnchorY: CGFloat
-        if #available(macOS 12.0, *), screen.safeAreaInsets.top > 0 {
-            // Notched display: place directly under the notch / menu bar.
-            // visibleFrame.maxY is below the menu bar; the notch occupies the
-            // menu-bar strip, so anchoring under visibleFrame keeps us clear of it.
-            topAnchorY = visible.maxY - gapBelowMenuBar
-        } else {
-            // Non-notch display: anchor top-center below the menu bar.
-            topAnchorY = visible.maxY - gapBelowMenuBar
-        }
-
-        let originY = topAnchorY - actualHeight
-
-        panel.setFrame(
-            NSRect(x: originX, y: originY, width: panelWidth, height: actualHeight),
-            display: true
-        )
+/// A simple upward triangle matching the buddy cursor's silhouette.
+private struct NotchTriangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
     }
 }
