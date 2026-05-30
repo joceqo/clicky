@@ -157,6 +157,40 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
+    // MARK: - Chat Window State
+
+    /// Persists conversations and screenshots to Application Support.
+    let conversationStore = ConversationStore()
+
+    /// All conversations, sorted by most recent activity. Drives the sidebar.
+    @Published var conversations: [Conversation] = []
+
+    /// The ID of the currently active conversation. Messages shown in the
+    /// chat window belong to this conversation.
+    @Published var activeConversationID: UUID?
+
+    /// All messages in the active conversation, ordered oldest-first.
+    @Published var chatMessages: [ChatMessage] = []
+
+    /// True while a text-chat message is being sent and the brain is streaming a
+    /// response. Used by ChatView to disable the send button and show the
+    /// typing indicator.
+    @Published private(set) var isSendingChatMessage: Bool = false
+
+    /// True once the chat conversations index has been loaded from disk so the
+    /// first time the chat window opens we don't redo the load.
+    private var hasLoadedConversations = false
+
+    /// Owns the chat NSWindow lifecycle. Created lazily on first open and kept
+    /// alive so reopening is instant.
+    private lazy var chatWindowController = ChatWindowController(companionManager: self)
+
+    /// Opens (or focuses) the windowed chat UI, loading conversations first.
+    func openChatWindow() {
+        loadChatConversationsIfNeeded()
+        chatWindowController.showChatWindow()
+    }
+
     /// The Claude model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
 
@@ -316,6 +350,10 @@ final class CompanionManager: ObservableObject {
                 provider: providerStore.provider(for: providerStore.tts.providerID)
             )
         )
+
+        // Load persisted chat conversations (migrating the legacy single-history
+        // format if present) and start a fresh conversation for this session.
+        loadChatConversationsIfNeeded()
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
@@ -739,6 +777,248 @@ final class CompanionManager: ObservableObject {
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
         case .none:
             break
+        }
+    }
+
+    // MARK: - Chat Conversation Lifecycle
+
+    /// Loads the conversations index from disk (running the one-time legacy
+    /// migration first), then starts a fresh conversation for this session so
+    /// new messages don't pile onto the previous one. Idempotent.
+    private func loadChatConversationsIfNeeded() {
+        guard !hasLoadedConversations else { return }
+        hasLoadedConversations = true
+
+        conversationStore.migrateFromLegacyHistoryIfNeeded()
+        conversations = conversationStore.loadConversationsIndex()
+        createNewConversation()
+    }
+
+    /// Switches to a different conversation, saving the current one first.
+    /// Rebuilds the API conversation history from the loaded messages so the
+    /// brain has context within the new conversation.
+    func switchToConversation(_ conversationID: UUID) {
+        guard conversationID != activeConversationID else { return }
+        guard !isSendingChatMessage else { return }
+
+        let previousMessages = chatMessages
+        let previousID = activeConversationID
+        if let previousID {
+            let store = conversationStore
+            let index = conversations
+            Task.detached(priority: .utility) {
+                store.saveMessages(previousMessages, for: previousID)
+                store.saveConversationsIndex(index)
+            }
+        }
+
+        activeConversationID = conversationID
+        chatMessages = conversationStore.loadMessages(for: conversationID)
+        rebuildConversationHistoryFromChatMessages()
+    }
+
+    /// Creates a new empty conversation, prepends it to the sidebar list,
+    /// and makes it active.
+    func createNewConversation() {
+        saveActiveConversationToDisk()
+
+        let newConversation = conversationStore.createConversation()
+        conversations.insert(newConversation, at: 0)
+        conversationStore.saveConversationsIndex(conversations)
+
+        activeConversationID = newConversation.id
+        chatMessages = []
+        conversationHistory = []
+    }
+
+    /// Deletes a conversation from disk and the sidebar list. If the deleted
+    /// conversation was active, switches to the most recent remaining one
+    /// or creates a new empty conversation.
+    func deleteConversation(_ conversationID: UUID) {
+        conversationStore.deleteConversation(id: conversationID)
+        conversations.removeAll { $0.id == conversationID }
+        conversationStore.saveConversationsIndex(conversations)
+
+        if conversationID == activeConversationID {
+            if let mostRecent = conversations.first {
+                activeConversationID = nil // Force switchToConversation to proceed
+                switchToConversation(mostRecent.id)
+            } else {
+                activeConversationID = nil
+                createNewConversation()
+            }
+        }
+    }
+
+    /// Persists the current active conversation's messages and updates
+    /// its metadata in the index.
+    private func saveActiveConversationToDisk() {
+        guard let activeID = activeConversationID else { return }
+        conversationStore.saveMessages(chatMessages, for: activeID)
+        updateConversationMetadata(for: activeID)
+    }
+
+    /// Updates the metadata (updatedAt, messageCount) for a conversation
+    /// in the index and saves the index to disk.
+    private func updateConversationMetadata(for conversationID: UUID) {
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        conversations[conversationIndex].updatedAt = Date()
+        conversations[conversationIndex].messageCount = chatMessages.count
+        conversationStore.saveConversationsIndex(conversations)
+    }
+
+    /// Auto-titles a conversation from the first user message if the title
+    /// is still the default "New Chat".
+    private func autoTitleActiveConversationIfNeeded(from userText: String) {
+        guard let activeID = activeConversationID,
+              let conversationIndex = conversations.firstIndex(where: { $0.id == activeID }),
+              conversations[conversationIndex].title == "New Chat"
+        else { return }
+
+        let trimmedText = userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+
+        let title: String
+        if trimmedText.count <= 40 {
+            title = trimmedText
+        } else {
+            let prefix = String(trimmedText.prefix(40))
+            if let lastSpace = prefix.lastIndex(of: " ") {
+                title = String(prefix[prefix.startIndex..<lastSpace])
+            } else {
+                title = prefix
+            }
+        }
+
+        conversations[conversationIndex].title = title
+    }
+
+    /// Rebuilds the in-memory `conversationHistory` (used for brain API context)
+    /// from the current `chatMessages`. Takes the last 10 user-assistant pairs.
+    private func rebuildConversationHistoryFromChatMessages() {
+        conversationHistory = []
+
+        var pairIndex = 0
+        while pairIndex < chatMessages.count {
+            let message = chatMessages[pairIndex]
+            if message.role == .user,
+               pairIndex + 1 < chatMessages.count,
+               chatMessages[pairIndex + 1].role == .assistant {
+                conversationHistory.append((
+                    userTranscript: message.content,
+                    assistantResponse: chatMessages[pairIndex + 1].content
+                ))
+                pairIndex += 2
+            } else {
+                pairIndex += 1
+            }
+        }
+
+        if conversationHistory.count > 10 {
+            conversationHistory.removeFirst(conversationHistory.count - 10)
+        }
+    }
+
+    // MARK: - Text Chat Pipeline
+
+    /// System prompt used for typed chat-window exchanges (no screen, no TTS).
+    private static let companionChatSystemPrompt = """
+    you're clicky, a friendly always-on companion that lives in the user's menu bar. \
+    the user is chatting with you via text in the clicky chat window. \
+    this is an ongoing conversation — you remember everything said before in this session, \
+    including any voice exchanges the user had earlier.
+
+    rules:
+    - always respond in the same language the user writes in. if they write in french, reply in french.
+    - you can give longer, more detailed responses than in voice mode — text doesn't have a length penalty.
+    - use markdown formatting when it helps: **bold** for emphasis, `code` for inline code, \
+    ```language blocks for multi-line code, bullet lists for steps. don't over-format casual replies.
+    - be direct and clear. avoid filler phrases like "certainly!" or "great question!".
+    - never say "simply" or "just".
+    - you can help with anything — coding, writing, analysis, general knowledge, brainstorming.
+    - don't end with a yes/no question like "want me to explain more?" — those are dead ends. \
+    if it fits, mention something bigger they could explore next.
+    """
+
+    /// Sends a typed message from the chat window to the active brain and streams
+    /// the response in-place into `chatMessages`. Text-only: passes an empty image
+    /// array to `brainClient.analyzeImageStreaming`, maps prior chat turns into the
+    /// `conversationHistory` tuples the protocol expects, and updates the assistant
+    /// placeholder as each accumulated chunk arrives. No screenshots, no TTS, no
+    /// cursor pointing — but it shares `conversationHistory` with voice mode.
+    func sendChatTextMessage(_ userText: String) {
+        guard !userText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        let userMessage = ChatMessage(role: .user, content: userText, source: .text)
+        chatMessages.append(userMessage)
+
+        // Empty assistant placeholder that streaming will fill in. The chat view
+        // shows a typing indicator while this message has no content.
+        let modelID = brainClient.model
+        let assistantPlaceholder = ChatMessage(role: .assistant, content: "", source: .text, modelID: modelID)
+        chatMessages.append(assistantPlaceholder)
+        let assistantPlaceholderID = assistantPlaceholder.id
+
+        isSendingChatMessage = true
+
+        Task {
+            defer { isSendingChatMessage = false }
+
+            do {
+                let responseStartTime = Date()
+
+                // Map prior chat turns into the (userPlaceholder, assistantResponse)
+                // tuples the BrainClient protocol expects.
+                let historyForAPI = conversationHistory.map { entry in
+                    (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+                }
+
+                let (fullResponseText, _) = try await brainClient.analyzeImageStreaming(
+                    images: [],
+                    systemPrompt: Self.companionChatSystemPrompt,
+                    conversationHistory: historyForAPI,
+                    userPrompt: userText,
+                    onTextChunk: { [weak self] accumulatedText in
+                        guard let self else { return }
+                        // analyzeImageStreaming delivers accumulated text (not just
+                        // the new chunk), so set rather than append.
+                        if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
+                            self.chatMessages[messageIndex].content = accumulatedText
+                        }
+                    }
+                )
+
+                let responseDuration = Date().timeIntervalSince(responseStartTime)
+
+                // Ensure the final content is set (the last onTextChunk may not have
+                // fired if the stream ended without a trailing chunk).
+                if let messageIndex = chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
+                    chatMessages[messageIndex].content = fullResponseText
+                    chatMessages[messageIndex].responseDurationSeconds = responseDuration
+                }
+
+                // Share this exchange with conversation history so future requests
+                // (voice or text) have context for what was already discussed.
+                conversationHistory.append((
+                    userTranscript: userText,
+                    assistantResponse: fullResponseText
+                ))
+                if conversationHistory.count > 10 {
+                    conversationHistory.removeFirst(conversationHistory.count - 10)
+                }
+
+                autoTitleActiveConversationIfNeeded(from: userText)
+
+                if let activeID = activeConversationID {
+                    conversationStore.saveMessages(chatMessages, for: activeID)
+                    updateConversationMetadata(for: activeID)
+                }
+            } catch {
+                if let messageIndex = chatMessages.firstIndex(where: { $0.id == assistantPlaceholderID }) {
+                    chatMessages[messageIndex].content = "Something went wrong — please try again."
+                }
+                print("⚠️ Chat text error: \(error)")
+            }
         }
     }
 
