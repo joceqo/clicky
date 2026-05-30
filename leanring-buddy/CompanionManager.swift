@@ -244,6 +244,10 @@ final class CompanionManager: ObservableObject {
     /// it can observe screen-parameter changes; positioned/shown on demand.
     let notchWindowManager = NotchWindowManager()
 
+    /// Owns the agent launcher state (subprocess runs + live output). Held here
+    /// so runs survive Notch tab switches and panel open/close.
+    let agentRunner = AgentRunner()
+
     /// Toggles the notch panel. Loads conversations first so the Threads tab is
     /// populated immediately (mirrors how openChatWindow primes the chat).
     func openNotch() {
