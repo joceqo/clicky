@@ -34,6 +34,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Line-buffer stdout so print() logs flush in real time even when output
+        // is redirected to a file (default full buffering hides logs until exit).
+        setvbuf(stdout, nil, _IOLBF, 0)
         print("🎯 Clicky: Starting...")
         print("🎯 Clicky: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 

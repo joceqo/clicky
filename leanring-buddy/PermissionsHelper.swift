@@ -19,6 +19,7 @@
 
 import AppKit
 import AVFoundation
+import Permiso
 import SwiftUI
 
 // MARK: - Permission Model
@@ -97,7 +98,14 @@ enum PermissionsHelper {
     static func request(_ permission: AppPermission) -> PermissionRequestPresentationDestination {
         switch permission {
         case .screenRecording: return WindowPositionManager.requestScreenRecordingPermission()
-        case .accessibility: return WindowPositionManager.requestAccessibilityPermission()
+        case .accessibility:
+            // Permiso's guided overlay (drag-the-icon-into-the-list panel) +
+            // the native AX prompt. request(_:) runs from the SwiftUI button
+            // action, i.e. already on the main actor.
+            MainActor.assumeIsolated {
+                PermisoAssistant.shared.present(panel: .accessibility)
+            }
+            return WindowPositionManager.requestAccessibilityPermission()
         case .microphone: return WindowPositionManager.requestMicrophonePermission()
         }
     }
