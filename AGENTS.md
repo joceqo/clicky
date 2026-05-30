@@ -69,6 +69,9 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `BrainClient.swift` | ~45 | Protocol for pluggable AI reasoning backends. `ClaudeAPI` and `OpenAICompatibleBrainAdapter` conform to it. |
 | `ClaudeAPI.swift` | ~292 | Claude vision API client conforming to `BrainClient`. Streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `OpenAICompatibleBrainAdapter.swift` | ~170 | `BrainClient` adapter for any OpenAI-format endpoint: OpenAI GPT-4o, local Ollama, LM Studio, etc. Images encoded as base64 data-URL `image_url` blocks. |
+| `OpenCodeServerManager.swift` | ~260 | `@MainActor` singleton owning a persistent `opencode serve` HTTP server: picks a free port, spawns the process (augmented PATH, like `CLIAgentBrainAdapter`), health-checks readiness, keeps it alive across turns, terminates it on app quit. |
+| `OpenCodeServerBrainClient.swift` | ~290 | `BrainClient` for the persistent OpenCode server. Reuses one session id across turns (no cold start, server-side multi-turn context), sends screenshots as base64 file parts, and falls back to on-device OCR text for non-vision models. |
+| `ScreenshotTextRecognizer.swift` | ~45 | Shared Vision OCR helper — extracts a screenshot's text on-device. Used by `OpenCodeServerBrainClient`'s non-vision fallback. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client (legacy, predates `BrainClient` protocol). |
 | `TTSClient.swift` | ~55 | Protocol for pluggable TTS backends + `TTSSentenceSplitter` (NLTokenizer sentence splitting for phrase-by-phrase playback). |
 | `ElevenLabsTTSClient.swift` | ~120 | ElevenLabs TTS client conforming to `TTSClient`. `speakText` awaits full playback completion, enabling CompanionManager's phrase-by-phrase loop. |

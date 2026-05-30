@@ -82,6 +82,14 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
+            case .openCodeServer:
+                TextField("Binary (name on PATH or absolute path)", text: $companionManager.brainProviderSettings.openCodeBinaryPath)
+                TextField("Model (providerID/modelID — empty = server default)", text: $companionManager.brainProviderSettings.openCodeModel)
+
+                Text("Runs `opencode serve` in the background and reuses a persistent session — no per-turn cold start, and multi-turn context is kept server-side. Requires `opencode` installed with a provider authenticated (`opencode auth login`). A vision model (e.g. anthropic/claude-sonnet-4-5) sees the screen directly; text-only models like the free `opencode/*` ones fall back to on-device OCR of the screenshot.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
             case .appleOCR:
                 Text("On-device OCR (Vision) extracts the screen's text, then Apple Intelligence reasons over it. Fully local, free, light on the Mac — but text-only (can't see images/layout). Requires macOS 26 + Apple Intelligence enabled.")
                     .font(.caption)
