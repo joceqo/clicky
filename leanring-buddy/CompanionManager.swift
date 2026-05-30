@@ -191,6 +191,19 @@ final class CompanionManager: ObservableObject {
         chatWindowController.showChatWindow()
     }
 
+    // MARK: - Notch Window
+
+    /// Owns the notch-anchored panel (NotchRootView shell). Created up front so
+    /// it can observe screen-parameter changes; positioned/shown on demand.
+    let notchWindowManager = NotchWindowManager()
+
+    /// Toggles the notch panel. Loads conversations first so the Threads tab is
+    /// populated immediately (mirrors how openChatWindow primes the chat).
+    func openNotch() {
+        loadChatConversationsIfNeeded()
+        notchWindowManager.toggle()
+    }
+
     /// The Claude model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
 
@@ -334,6 +347,7 @@ final class CompanionManager: ObservableObject {
     }
 
     func start() {
+        notchWindowManager.configure(companionManager: self)
         refreshAllPermissions()
         print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()

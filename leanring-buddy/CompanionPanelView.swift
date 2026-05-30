@@ -35,6 +35,12 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 8)
 
+                openNotchButton
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 8)
+
                 openSettingsButton
                     .padding(.horizontal, 16)
             }
@@ -419,6 +425,30 @@ struct CompanionPanelView: View {
                 Image(systemName: "bubble.left.and.bubble.right.fill")
                     .font(.system(size: 12, weight: .medium))
                 Text("Open chat")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+            }
+            .foregroundColor(DS.Colors.textSecondary)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .background(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
+                    .fill(DS.Colors.surface2)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Open Notch Button
+
+    private var openNotchButton: some View {
+        Button(action: {
+            companionManager.openNotch()
+        }) {
+            HStack(spacing: 8) {
+                Image(systemName: "menubar.rectangle")
+                    .font(.system(size: 12, weight: .medium))
+                Text("Open notch")
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
             }
