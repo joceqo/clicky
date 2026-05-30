@@ -769,8 +769,7 @@ struct BlueCursorView: View {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                     self.showWelcome = false
-                    // Start the onboarding video right after the welcome text disappears
-                    self.companionManager.setupOnboardingVideo()
+                    // Farza's onboarding video removed for joceclicky.
                 }
                 return
             }

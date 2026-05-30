@@ -24,6 +24,9 @@ enum BrainProviderType: String, Codable, CaseIterable, Identifiable {
     case openAICompat = "openai_compat"
     /// A local agent CLI driven as a subprocess (Claude Code, OpenCode, Codex, Cursor).
     case cliAgent = "cli_agent"
+    /// On-device OCR (Vision) + Apple Intelligence LLM. Low-compute, text-only
+    /// (reads screen text, can't see images). Requires macOS 26 + Apple Intelligence.
+    case appleOCR = "apple_ocr"
 
     var id: String { rawValue }
 
@@ -32,6 +35,7 @@ enum BrainProviderType: String, Codable, CaseIterable, Identifiable {
         case .claudeWorker: return "Claude (Worker proxy)"
         case .openAICompat: return "OpenAI-compatible (LM Studio / API key)"
         case .cliAgent:     return "Agent CLI (Claude Code / OpenCode / Codex / Cursor)"
+        case .appleOCR:     return "Apple OCR + on-device LLM (light, text-only)"
         }
     }
 }
@@ -151,6 +155,9 @@ enum BrainProviderFactory {
                 .split(whereSeparator: { $0 == " " || $0 == "\n" })
                 .map(String.init)
             return CLIAgentBrainAdapter(command: settings.cliCommand, argsTemplate: args)
+
+        case .appleOCR:
+            return AppleOCRBrainAdapter()
         }
     }
 

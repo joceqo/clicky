@@ -80,6 +80,11 @@ struct SettingsView: View {
                 Text("Spawns the agent CLI as a subprocess; the screenshot is written to a temp file and its path is passed in the prompt. Slower than HTTP, and the agent must be able to read the image file.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+            case .appleOCR:
+                Text("On-device OCR (Vision) extracts the screen's text, then Apple Intelligence reasons over it. Fully local, free, light on the Mac — but text-only (can't see images/layout). Requires macOS 26 + Apple Intelligence enabled.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }

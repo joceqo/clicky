@@ -29,12 +29,6 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 12)
 
-                modelPickerRow
-                    .padding(.horizontal, 16)
-
-                Spacer()
-                    .frame(height: 12)
-
                 openSettingsButton
                     .padding(.horizontal, 16)
             }
