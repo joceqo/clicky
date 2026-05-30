@@ -283,8 +283,8 @@ struct BlueCursorView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
-                            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.5), radius: 6, x: 0, y: 0)
+                            .fill(buddyCursorColor)
+                            .shadow(color: buddyCursorColor.opacity(0.5), radius: 6, x: 0, y: 0)
                     )
                     .fixedSize()
                     .overlay(
@@ -327,8 +327,8 @@ struct BlueCursorView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
-                            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.5), radius: 6, x: 0, y: 0)
+                            .fill(buddyCursorColor)
+                            .shadow(color: buddyCursorColor.opacity(0.5), radius: 6, x: 0, y: 0)
                     )
                     .fixedSize()
                     .overlay(
@@ -357,9 +357,9 @@ struct BlueCursorView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
+                            .fill(buddyCursorColor)
                             .shadow(
-                                color: DS.Colors.overlayCursorBlue.opacity(0.5 + (1.0 - navigationBubbleScale) * 1.0),
+                                color: buddyCursorColor.opacity(0.5 + (1.0 - navigationBubbleScale) * 1.0),
                                 radius: 6 + (1.0 - navigationBubbleScale) * 16,
                                 x: 0, y: 0
                             )
@@ -822,6 +822,9 @@ struct BlueCursorView: View {
 private struct BlueCursorWaveformView: View {
     let audioPowerLevel: CGFloat
 
+    @AppStorage(buddyCursorColorKey) private var buddyCursorColorRaw: String = BuddyCursorColor.blue.rawValue
+    private var buddyCursorColor: Color { (BuddyCursorColor(rawValue: buddyCursorColorRaw) ?? .blue).color }
+
     private let barCount = 5
     private let listeningBarProfile: [CGFloat] = [0.4, 0.7, 1.0, 0.7, 0.4]
 
@@ -830,7 +833,7 @@ private struct BlueCursorWaveformView: View {
             HStack(alignment: .center, spacing: 2) {
                 ForEach(0..<barCount, id: \.self) { barIndex in
                     RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(DS.Colors.overlayCursorBlue)
+                        .fill(buddyCursorColor)
                         .frame(
                             width: 2,
                             height: barHeight(
@@ -840,7 +843,7 @@ private struct BlueCursorWaveformView: View {
                         )
                 }
             }
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
+            .shadow(color: buddyCursorColor.opacity(0.6), radius: 6, x: 0, y: 0)
             .animation(.linear(duration: 0.08), value: audioPowerLevel)
         }
     }
@@ -862,14 +865,17 @@ private struct BlueCursorWaveformView: View {
 private struct BlueCursorSpinnerView: View {
     @State private var isSpinning = false
 
+    @AppStorage(buddyCursorColorKey) private var buddyCursorColorRaw: String = BuddyCursorColor.blue.rawValue
+    private var buddyCursorColor: Color { (BuddyCursorColor(rawValue: buddyCursorColorRaw) ?? .blue).color }
+
     var body: some View {
         Circle()
             .trim(from: 0.15, to: 0.85)
             .stroke(
                 AngularGradient(
                     colors: [
-                        DS.Colors.overlayCursorBlue.opacity(0.0),
-                        DS.Colors.overlayCursorBlue
+                        buddyCursorColor.opacity(0.0),
+                        buddyCursorColor
                     ],
                     center: .center
                 ),
@@ -877,7 +883,7 @@ private struct BlueCursorSpinnerView: View {
             )
             .frame(width: 14, height: 14)
             .rotationEffect(.degrees(isSpinning ? 360 : 0))
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
+            .shadow(color: buddyCursorColor.opacity(0.6), radius: 6, x: 0, y: 0)
             .onAppear {
                 withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
                     isSpinning = true
