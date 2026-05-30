@@ -22,6 +22,8 @@ enum BrainProviderType: String, Codable, CaseIterable, Identifiable {
     /// Any OpenAI-compatible /v1/chat/completions endpoint with vision
     /// (LM Studio local, OpenAI, Gemini-compat, custom server).
     case openAICompat = "openai_compat"
+    /// A local agent CLI driven as a subprocess (Claude Code, OpenCode, Codex, Cursor).
+    case cliAgent = "cli_agent"
 
     var id: String { rawValue }
 
@@ -29,6 +31,7 @@ enum BrainProviderType: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .claudeWorker: return "Claude (Worker proxy)"
         case .openAICompat: return "OpenAI-compatible (LM Studio / API key)"
+        case .cliAgent:     return "Agent CLI (Claude Code / OpenCode / Codex / Cursor)"
         }
     }
 }
@@ -45,6 +48,12 @@ struct BrainProviderSettings: Codable {
     var openAICompatBaseURL: String = "http://localhost:1234"   // LM Studio default
     var openAICompatAPIKey: String  = ""                        // empty for local servers
     var openAICompatModel: String   = "qwen2.5-vl-7b-instruct"  // must be a vision model
+
+    // CLI agent settings — drive a local agent binary as a subprocess.
+    // `cliArgsTemplate` is whitespace-split into arguments; the `{prompt}` token
+    // is replaced (as a single argument) by the composed prompt.
+    var cliCommand: String      = "claude"
+    var cliArgsTemplate: String = "-p {prompt} --output-format text --dangerously-skip-permissions"
 }
 
 // MARK: - Named presets
@@ -79,6 +88,38 @@ extension BrainProviderSettings {
             openAICompatModel: model
         )
     }
+
+    // ── Agent CLI presets ───────────────────────────────────────────────
+    // Commands resolve via an augmented PATH (Homebrew, ~/.local/bin) in the adapter,
+    // so bare names work even though GUI apps don't inherit the shell PATH.
+
+    static var claudeCode: BrainProviderSettings {
+        var s = BrainProviderSettings(); s.providerType = .cliAgent
+        s.cliCommand = "claude"
+        s.cliArgsTemplate = "-p {prompt} --output-format text --dangerously-skip-permissions"
+        return s
+    }
+
+    static var openCode: BrainProviderSettings {
+        var s = BrainProviderSettings(); s.providerType = .cliAgent
+        s.cliCommand = "opencode"
+        s.cliArgsTemplate = "run {prompt}"
+        return s
+    }
+
+    static var codex: BrainProviderSettings {
+        var s = BrainProviderSettings(); s.providerType = .cliAgent
+        s.cliCommand = "codex"
+        s.cliArgsTemplate = "exec {prompt}"
+        return s
+    }
+
+    static var cursorAgent: BrainProviderSettings {
+        var s = BrainProviderSettings(); s.providerType = .cliAgent
+        s.cliCommand = "cursor-agent"
+        s.cliArgsTemplate = "{prompt}"
+        return s
+    }
 }
 
 // MARK: - Factory
@@ -104,6 +145,12 @@ enum BrainProviderFactory {
                 model: settings.openAICompatModel,
                 apiKey: settings.openAICompatAPIKey.isEmpty ? nil : settings.openAICompatAPIKey
             )
+
+        case .cliAgent:
+            let args = settings.cliArgsTemplate
+                .split(whereSeparator: { $0 == " " || $0 == "\n" })
+                .map(String.init)
+            return CLIAgentBrainAdapter(command: settings.cliCommand, argsTemplate: args)
         }
     }
 

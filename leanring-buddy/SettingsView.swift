@@ -63,6 +63,23 @@ struct SettingsView: View {
                 Text("The brain sees your screen → pick a vision model (Qwen-VL, Gemma 3 4B+). LM Studio default: http://localhost:1234")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+            case .cliAgent:
+                HStack {
+                    Button("Claude Code") { companionManager.brainProviderSettings = .claudeCode }
+                    Button("OpenCode") { companionManager.brainProviderSettings = .openCode }
+                    Button("Codex") { companionManager.brainProviderSettings = .codex }
+                    Button("Cursor") { companionManager.brainProviderSettings = .cursorAgent }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                TextField("Command", text: $companionManager.brainProviderSettings.cliCommand)
+                TextField("Arguments ({prompt} = the prompt)", text: $companionManager.brainProviderSettings.cliArgsTemplate)
+
+                Text("Spawns the agent CLI as a subprocess; the screenshot is written to a temp file and its path is passed in the prompt. Slower than HTTP, and the agent must be able to read the image file.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
