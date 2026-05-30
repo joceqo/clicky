@@ -72,9 +72,17 @@ final class CompanionManager: ObservableObject {
     /// through this so keys never ship in the app binary.
     private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
 
-    private lazy var brainClient: any BrainClient = {
-        ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
-    }()
+    /// Active brain (LLM) backend. Resolved from BrainProviderSettings and replaced
+    /// immediately when the user changes the provider in Settings.
+    private lazy var brainClient: any BrainClient = BrainProviderFactory.makeClient(
+        settings: brainProviderSettings,
+        claudeProxyURL: "\(Self.workerBaseURL)/chat"
+    )
+
+    /// The current brain provider settings, persisted to UserDefaults.
+    @Published var brainProviderSettings: BrainProviderSettings = BrainProviderFactory.loadSettings() {
+        didSet { applyBrainProviderSettings() }
+    }
 
     /// Active TTS backend. Resolved from TTSProviderSettings at startup and replaced
     /// immediately when the user changes the TTS provider in Settings.
@@ -141,6 +149,18 @@ final class CompanionManager: ObservableObject {
         )
         TTSProviderFactory.saveSettings(ttsProviderSettings)
         print("🔊 TTS provider: \(ttsProviderSettings.providerType.displayName)")
+    }
+
+    /// Applies the current `brainProviderSettings` by rebuilding the brain client.
+    /// Cancels any in-flight response first so the swap is clean.
+    private func applyBrainProviderSettings() {
+        currentResponseTask?.cancel()
+        brainClient = BrainProviderFactory.makeClient(
+            settings: brainProviderSettings,
+            claudeProxyURL: "\(Self.workerBaseURL)/chat"
+        )
+        BrainProviderFactory.saveSettings(brainProviderSettings)
+        print("🧠 Brain provider: \(brainProviderSettings.providerType.displayName)")
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -804,7 +824,7 @@ final class CompanionManager: ObservableObject {
     /// credits run out. Uses NSSpeechSynthesizer so it works even when
     /// ElevenLabs is down.
     private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
+        let utterance = "My brain backend isn't responding. Check your provider settings."
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
