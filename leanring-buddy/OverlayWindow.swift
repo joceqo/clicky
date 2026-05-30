@@ -97,44 +97,60 @@ struct ResponseBubbleSizePreferenceKey: PreferenceKey {
 /// Shows the full response text split into phrases. The currently-playing
 /// phrase is rendered at full brightness; already-spoken phrases are slightly
 /// dimmed and upcoming phrases are more dimmed, giving a live progress feel.
+private struct ResponseContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 private struct PhraseHighlightResponseBubbleView: View {
     let phrases: [String]
     let activePhraseIndex: Int?
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            ForEach(visibleWindow, id: \.index) { item in
-                Text(item.text)
-                    .font(.system(size: 12, weight: item.index == activePhraseIndex ? .semibold : .regular))
-                    .foregroundColor(DS.Colors.textPrimary.opacity(phraseTextOpacity(forIndex: item.index)))
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 280, alignment: .leading)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: activePhraseIndex)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(DS.Colors.surface1.opacity(0.95))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(DS.Colors.borderSubtle.opacity(0.4), lineWidth: 0.8)
-                )
-                .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 6)
-        )
-    }
+    @State private var contentHeight: CGFloat = 0
+    private let maxBubbleHeight: CGFloat = 340
 
-    /// A sliding window around the active phrase so long responses don't render as
-    /// one wall of text: 1 phrase behind + current + 2 ahead. Advances with the TTS.
-    private var visibleWindow: [(index: Int, text: String)] {
-        guard !phrases.isEmpty else { return [] }
-        let active = activePhraseIndex ?? 0
-        let lower = max(0, active - 1)
-        let upper = min(phrases.count, active + 3)
-        return (lower..<upper).map { (index: $0, text: phrases[$0]) }
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(phrases.enumerated()), id: \.offset) { index, phrase in
+                        Text(phrase)
+                            .font(.system(size: 12, weight: index == activePhraseIndex ? .semibold : .regular))
+                            .foregroundColor(DS.Colors.textPrimary.opacity(phraseTextOpacity(forIndex: index)))
+                            .lineSpacing(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id(index)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: ResponseContentHeightKey.self, value: geo.size.height)
+                    }
+                )
+            }
+            // Bubble = content height capped at maxBubbleHeight, so it grows with the
+            // text but never overflows; the ScrollView scrolls past that.
+            .frame(width: 304, height: min(contentHeight, maxBubbleHeight))
+            .onPreferenceChange(ResponseContentHeightKey.self) { contentHeight = $0 }
+            .onChange(of: activePhraseIndex) { _, newIndex in
+                guard let newIndex else { return }
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    proxy.scrollTo(newIndex, anchor: .center)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(DS.Colors.surface1.opacity(0.95))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(DS.Colors.borderSubtle.opacity(0.4), lineWidth: 0.8)
+                    )
+                    .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 6)
+            )
+        }
     }
 
     private func phraseTextOpacity(forIndex index: Int) -> Double {
@@ -369,7 +385,6 @@ struct BlueCursorView: View {
                     phrases: companionManager.currentResponsePhrases,
                     activePhraseIndex: companionManager.currentlySpeakingPhraseIndex
                 )
-                .fixedSize()
                 .overlay(
                     GeometryReader { geo in
                         Color.clear
