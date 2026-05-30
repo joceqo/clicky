@@ -13,6 +13,11 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var companionManager: CompanionManager
 
+    @State private var openCodeModels: [OpenCodeModelInfo] = []
+    @State private var openCodeModelsLoading = false
+    @State private var openCodeModelsError: String?
+    @State private var openCodeFreeOnly = true
+
     var body: some View {
         Form {
             brainSection
@@ -21,6 +26,27 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(minWidth: 480, minHeight: 520)
+    }
+
+    // MARK: - OpenCode model loading
+
+    private func loadOpenCodeModels() {
+        openCodeModelsLoading = true
+        openCodeModelsError = nil
+        let binary = companionManager.brainProviderSettings.openCodeBinaryPath
+        Task { @MainActor in
+            do {
+                let baseURL = try await OpenCodeServerManager.shared.ensureRunning(
+                    binaryPath: binary.isEmpty ? "opencode" : binary
+                )
+                let models = try await OpenCodeModelCatalog.fetch(baseURL: baseURL)
+                openCodeModels = models
+                if models.isEmpty { openCodeModelsError = "No models returned by the server." }
+            } catch {
+                openCodeModelsError = "Couldn't load models: \(error.localizedDescription)"
+            }
+            openCodeModelsLoading = false
+        }
     }
 
     // MARK: - Brain
@@ -84,9 +110,53 @@ struct SettingsView: View {
 
             case .openCodeServer:
                 TextField("Binary (name on PATH or absolute path)", text: $companionManager.brainProviderSettings.openCodeBinaryPath)
-                TextField("Model (providerID/modelID — empty = server default)", text: $companionManager.brainProviderSettings.openCodeModel)
 
-                Text("Runs `opencode serve` in the background and reuses a persistent session — no per-turn cold start, and multi-turn context is kept server-side. Requires `opencode` installed with a provider authenticated (`opencode auth login`). A vision model (e.g. anthropic/claude-sonnet-4-5) sees the screen directly; text-only models like the free `opencode/*` ones fall back to on-device OCR of the screenshot.")
+                HStack {
+                    Button(openCodeModelsLoading ? "Loading models…" : "Load models") {
+                        loadOpenCodeModels()
+                    }
+                    .disabled(openCodeModelsLoading)
+                    if !openCodeModels.isEmpty {
+                        Text("\(openCodeModels.count) available").foregroundStyle(.secondary)
+                    }
+                }
+
+                if openCodeModels.isEmpty {
+                    // Fallback before models are loaded (or if loading fails): type the slug.
+                    TextField("Model (providerID/modelID — empty = server default)", text: $companionManager.brainProviderSettings.openCodeModel)
+                } else {
+                    Toggle("Free models only (no API key needed)", isOn: $openCodeFreeOnly)
+                    let shownModels = openCodeFreeOnly ? openCodeModels.filter(\.isFree) : openCodeModels
+                    Picker("Model", selection: $companionManager.brainProviderSettings.openCodeModel) {
+                        Text("Server default").tag("")
+                        ForEach(shownModels) { model in
+                            Text(model.isFree ? "\(model.menuLabel)  · free" : model.menuLabel).tag(model.id)
+                        }
+                    }
+                    if let selected = openCodeModels.first(where: { $0.id == companionManager.brainProviderSettings.openCodeModel }) {
+                        HStack(spacing: 10) {
+                            Label("Vision", systemImage: selected.hasVision ? "eye.fill" : "eye.slash")
+                                .foregroundStyle(selected.hasVision ? .green : .secondary)
+                            Label("Reasoning", systemImage: selected.hasReasoning ? "brain" : "brain")
+                                .foregroundStyle(selected.hasReasoning ? .green : .secondary)
+                            Label("Tools", systemImage: selected.hasTools ? "wrench.and.screwdriver.fill" : "wrench.and.screwdriver")
+                                .foregroundStyle(selected.hasTools ? .green : .secondary)
+                        }
+                        .font(.caption)
+                        .labelStyle(.titleAndIcon)
+                        if !selected.hasVision {
+                            Text("No vision → the screenshot is OCR'd on-device and sent as text.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                if let openCodeModelsError {
+                    Text(openCodeModelsError).font(.caption).foregroundStyle(.red)
+                }
+
+                Text("Runs `opencode serve` in the background and reuses a persistent session — no per-turn cold start, multi-turn context kept server-side. Requires `opencode` with a provider authenticated (`opencode auth login`).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
