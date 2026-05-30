@@ -10,6 +10,7 @@
 		AA00BB032F6500030039DA55 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB022F6500020039DA55 /* Sparkle */; };
 		AA00BB062F6500060039DA55 /* PostHog in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB052F6500050039DA55 /* PostHog */; };
 		AA00BB122F6500120039DA55 /* Permiso in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB112F6500110039DA55 /* Permiso */; };
+		AA00BB222F6500220039DA55 /* BackgroundComputerUseKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB212F6500210039DA55 /* BackgroundComputerUseKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -61,6 +62,7 @@
 				AA00BB032F6500030039DA55 /* Sparkle in Frameworks */,
 				AA00BB062F6500060039DA55 /* PostHog in Frameworks */,
 				AA00BB122F6500120039DA55 /* Permiso in Frameworks */,
+				AA00BB222F6500220039DA55 /* BackgroundComputerUseKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -124,6 +126,7 @@
 				AA00BB022F6500020039DA55 /* Sparkle */,
 				AA00BB052F6500050039DA55 /* PostHog */,
 				AA00BB112F6500110039DA55 /* Permiso */,
+				AA00BB212F6500210039DA55 /* BackgroundComputerUseKit */,
 			);
 			productName = "leanring-buddy";
 			productReference = 28F22CBF2F56440300A0FC59 /* Clicky.app */;
@@ -211,6 +214,7 @@
 				AA00BB012F6500010039DA55 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				AA00BB042F6500040039DA55 /* XCRemoteSwiftPackageReference "posthog-ios" */,
 				AA00BB102F6500100039DA55 /* XCRemoteSwiftPackageReference "permiso" */,
+				AA00BB202F6500200039DA55 /* XCRemoteSwiftPackageReference "background-computer-use" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 28F22CC02F56440300A0FC59 /* Products */;
@@ -628,6 +632,14 @@
 				kind = branch;
 			};
 		};
+		AA00BB202F6500200039DA55 /* XCRemoteSwiftPackageReference "background-computer-use" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/actuallyepic/background-computer-use";
+			requirement = {
+				kind = exactVersion;
+				version = 0.1.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -645,6 +657,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA00BB102F6500100039DA55 /* XCRemoteSwiftPackageReference "permiso" */;
 			productName = Permiso;
+		};
+		AA00BB212F6500210039DA55 /* BackgroundComputerUseKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA00BB202F6500200039DA55 /* XCRemoteSwiftPackageReference "background-computer-use" */;
+			productName = BackgroundComputerUseKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
