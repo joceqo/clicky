@@ -175,6 +175,9 @@ struct SettingsView: View {
                     .textContentType(.URL)
                 TextField("Model", text: $companionManager.ttsProviderSettings.openAICompatModel)
                 TextField("Voice", text: $companionManager.ttsProviderSettings.openAICompatVoice)
+                Stepper(value: $companionManager.ttsProviderSettings.openAICompatSpeed, in: 0.5...2.0, step: 0.1) {
+                    Text("Speech rate: \(companionManager.ttsProviderSettings.openAICompatSpeed, specifier: "%.1f")×")
+                }
                 APIKeyField(title: "API key (leave empty for local)", key: $companionManager.ttsProviderSettings.openAICompatAPIKey)
             } else if companionManager.ttsProviderSettings.providerType == .elevenLabs {
                 Text("Uses the Cloudflare Worker proxy configured in code.")

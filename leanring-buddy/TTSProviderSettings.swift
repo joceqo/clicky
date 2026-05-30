@@ -75,14 +75,17 @@ extension TTSProviderSettings {
 
     /// Mistral TTS (requires API key). NOTE: this is Mistral's text-to-speech,
     /// NOT Voxtral — Voxtral is Mistral's speech-to-text model (see STTProviderSettings).
-    static func mistral(apiKey: String, voice: String = "en_paul_neutral") -> TTSProviderSettings {
+    // Mistral exposes 30 voices via GET /v1/audio/voices (must request the full
+    // catalog — paginate with `limit`, not just the default first page of 10).
+    // 6 are French: fr_marie_{neutral,happy,sad,angry,excited,curious}.
+    static func mistral(apiKey: String, voice: String = "fr_marie_neutral") -> TTSProviderSettings {
         TTSProviderSettings(
             providerType: .openAICompat,
             openAICompatBaseURL: "https://api.mistral.ai",
             openAICompatAPIKey: apiKey,
-            openAICompatModel: "mistral-tts-latest",
+            openAICompatModel: "voxtral-mini-tts-2603",
             openAICompatVoice: voice,
-            openAICompatSpeed: 1.0
+            openAICompatSpeed: 1.2
         )
     }
 
@@ -138,8 +141,13 @@ enum TTSProviderFactory {
 
     static func loadSettings() -> TTSProviderSettings {
         guard let data = UserDefaults.standard.data(forKey: userDefaultsKey),
-              let settings = try? JSONDecoder().decode(TTSProviderSettings.self, from: data) else {
+              var settings = try? JSONDecoder().decode(TTSProviderSettings.self, from: data) else {
             return TTSProviderSettings()
+        }
+        // Migrate the invalid placeholder model shipped in an earlier build so
+        // users don't have to re-pick the Mistral preset to fix the 400.
+        if settings.openAICompatModel == "mistral-tts-latest" {
+            settings.openAICompatModel = "voxtral-mini-tts-2603"
         }
         return settings
     }

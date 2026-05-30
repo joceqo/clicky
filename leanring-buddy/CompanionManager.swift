@@ -10,6 +10,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import NaturalLanguage
 import PostHog
 import ScreenCaptureKit
 import SwiftUI
@@ -25,6 +26,10 @@ enum CompanionVoiceState {
 final class CompanionManager: ObservableObject {
     @Published private(set) var voiceState: CompanionVoiceState = .idle
     @Published private(set) var lastTranscript: String?
+    /// BCP-47 code (e.g. "fr", "en") detected from the last transcript via
+    /// NLLanguageRecognizer — works for any STT provider since it runs on the
+    /// transcribed text. Used to keep the brain's reply and TTS in the same language.
+    @Published private(set) var detectedLanguage: String?
     @Published private(set) var currentAudioPowerLevel: CGFloat = 0
     @Published private(set) var hasAccessibilityPermission = false
     @Published private(set) var hasScreenRecordingPermission = false
@@ -123,6 +128,10 @@ final class CompanionManager: ObservableObject {
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
     private var transientHideTask: Task<Void, Never>?
+
+    /// Global + local Escape-key monitors used to interrupt the current response
+    /// and stop TTS playback.
+    private var escapeKeyMonitors: [Any] = []
 
     /// True when all three required permissions (accessibility, screen recording,
     /// microphone) are granted. Used by the panel to show a single "all good" state.
@@ -240,6 +249,7 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        installEscapeInterruptMonitor()
         // Eagerly init the brain client so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = brainClient
@@ -350,7 +360,37 @@ final class CompanionManager: ObservableObject {
         detectedElementBubbleText = nil
     }
 
+    /// Installs Escape-key monitors (keyCode 53). Global fires when another app
+    /// is focused; local fires when our own window (e.g. Settings) is focused.
+    private func installEscapeInterruptMonitor() {
+        let onEscape: (NSEvent) -> Void = { [weak self] event in
+            guard event.keyCode == 53 else { return }
+            self?.interruptResponseAndAudio()
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: onEscape) {
+            escapeKeyMonitors.append(global)
+        }
+        let local = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            onEscape(event)
+            return event
+        }
+        if let local { escapeKeyMonitors.append(local) }
+    }
+
+    /// Cancels any in-flight response and stops TTS playback. Triggered by Escape.
+    func interruptResponseAndAudio() {
+        guard voiceState != .idle || ttsClient.isPlaying else { return }
+        currentResponseTask?.cancel()
+        ttsClient.stopPlayback()
+        currentResponsePhrases = []
+        currentlySpeakingPhraseIndex = nil
+        voiceState = .idle
+        print("⎋ Escape — interrupted response/audio")
+    }
+
     func stop() {
+        for monitor in escapeKeyMonitors { NSEvent.removeMonitor(monitor) }
+        escapeKeyMonitors.removeAll()
         globalPushToTalkShortcutMonitor.stop()
         buddyDictationManager.cancelCurrentDictation()
         overlayWindowManager.hideOverlay()
@@ -584,7 +624,15 @@ final class CompanionManager: ObservableObject {
                     },
                     submitDraftText: { [weak self] finalTranscript in
                         self?.lastTranscript = finalTranscript
+                        let recognizer = NLLanguageRecognizer()
+                        // FR/EN only for now → 2 candidates make detection robust
+                        // even on short phrases (avoids "Ok, petit test." → Polish).
+                        recognizer.languageConstraints = [.french, .english]
+                        recognizer.processString(finalTranscript)
+                        let detected = recognizer.dominantLanguage?.rawValue
+                        self?.detectedLanguage = detected
                         print("🗣️ Companion received transcript: \(finalTranscript)")
+                        print("🌐 Detected language: \(detected ?? "unknown")")
                         ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
                         self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
                     }
@@ -675,9 +723,18 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
+                // Force the reply to match the detected spoken language (FR/EN).
+                let languageDirective: String
+                switch detectedLanguage {
+                case "fr": languageDirective = "\n\nIMPORTANT: the user is speaking French — reply entirely in French."
+                case "en": languageDirective = "\n\nIMPORTANT: the user is speaking English — reply entirely in English."
+                default:   languageDirective = ""
+                }
+                let systemPrompt = Self.companionVoiceResponseSystemPrompt + languageDirective
+
                 let (fullResponseText, _) = try await brainClient.analyzeImageStreaming(
                     images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                    systemPrompt: systemPrompt,
                     conversationHistory: historyForAPI,
                     userPrompt: transcript,
                     onTextChunk: { _ in
@@ -779,11 +836,17 @@ final class CompanionManager: ObservableObject {
                         }
 
                         currentlySpeakingPhraseIndex = nil
+                    } catch is CancellationError {
+                        // Interrupted (e.g. Escape pressed) — clean up silently,
+                        // do NOT play the system-voice fallback.
+                        currentlySpeakingPhraseIndex = nil
+                        currentResponsePhrases = []
                     } catch {
                         currentlySpeakingPhraseIndex = nil
                         currentResponsePhrases = []
+                        if Task.isCancelled { return }
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
-                        print("⚠️ ElevenLabs TTS error: \(error)")
+                        print("⚠️ TTS error: \(error)")
                         speakCreditsErrorFallback()
                     }
                 }
@@ -861,42 +924,43 @@ final class CompanionManager: ObservableObject {
     /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
     /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
     static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
-        // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
-        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
-
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
-              let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)) else {
-            // No tag found at all
-            return PointingParseResult(spokenText: responseText, coordinate: nil, elementLabel: nil, screenNumber: nil)
-        }
-
-        // Remove the tag from the spoken text
-        let tagRange = Range(match.range, in: responseText)!
-        let spokenText = String(responseText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Check if it's [POINT:none]
-        guard match.numberOfRanges >= 3,
-              let xRange = Range(match.range(at: 1), in: responseText),
-              let yRange = Range(match.range(at: 2), in: responseText),
-              let x = Double(responseText[xRange]),
-              let y = Double(responseText[yRange]) else {
-            return PointingParseResult(spokenText: spokenText, coordinate: nil, elementLabel: "none", screenNumber: nil)
-        }
-
+        // Extract coordinates if present — search ANYWHERE, not only at the end
+        // (the Apple brain sometimes puts the tag mid-text or slightly malformed).
+        var coordinate: CGPoint? = nil
         var elementLabel: String? = nil
-        if match.numberOfRanges >= 4, let labelRange = Range(match.range(at: 3), in: responseText) {
-            elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
+        var screenNumber: Int? = nil
+        let coordPattern = #"\[POINT:(\d+)\s*,\s*(\d+)(?::([^\]:]+?))?(?::screen(\d+))?\]"#
+        if let regex = try? NSRegularExpression(pattern: coordPattern, options: []),
+           let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)),
+           let xRange = Range(match.range(at: 1), in: responseText),
+           let yRange = Range(match.range(at: 2), in: responseText),
+           let x = Double(responseText[xRange]),
+           let y = Double(responseText[yRange]) {
+            coordinate = CGPoint(x: x, y: y)
+            if let labelRange = Range(match.range(at: 3), in: responseText) {
+                elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
+            }
+            if let screenRange = Range(match.range(at: 4), in: responseText) {
+                screenNumber = Int(responseText[screenRange])
+            }
         }
 
-        var screenNumber: Int? = nil
-        if match.numberOfRanges >= 5, let screenRange = Range(match.range(at: 4), in: responseText) {
-            screenNumber = Int(responseText[screenRange])
+        // Strip ANY [POINT:...] tag (incl. [POINT:none] and malformed/unterminated)
+        // so the marker never leaks into the spoken text.
+        var spokenText = responseText
+        if let stripRegex = try? NSRegularExpression(pattern: #"\s*\[POINT:[^\]]*\]?"#, options: []) {
+            spokenText = stripRegex.stringByReplacingMatches(
+                in: spokenText,
+                range: NSRange(spokenText.startIndex..., in: spokenText),
+                withTemplate: ""
+            )
         }
+        spokenText = spokenText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return PointingParseResult(
             spokenText: spokenText,
-            coordinate: CGPoint(x: x, y: y),
-            elementLabel: elementLabel,
+            coordinate: coordinate,
+            elementLabel: elementLabel ?? (coordinate == nil ? "none" : nil),
             screenNumber: screenNumber
         )
     }

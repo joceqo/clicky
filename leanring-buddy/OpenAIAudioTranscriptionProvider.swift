@@ -288,11 +288,8 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
             value: modelName,
             usingBoundary: boundary
         )
-        requestBodyData.appendMultipartFormField(
-            named: "language",
-            value: "en",
-            usingBoundary: boundary
-        )
+        // No `language` field → the model auto-detects the spoken language,
+        // so French (etc.) transcribes correctly instead of being forced to English.
         requestBodyData.appendMultipartFormField(
             named: "response_format",
             value: "json",
