@@ -28,6 +28,19 @@ final class NotchWindowManager: NSObject {
     private var isShown = false
     private var hoverCancellable: AnyCancellable?
 
+    /// Pending hover-driven transition (cancellable so we can debounce). Only one
+    /// is ever in flight; a new hover event cancels the previous pending task.
+    private var hoverTransitionTask: Task<Void, Never>?
+
+    /// Hover-intent delay before EXPANDING — merely passing the cursor near the
+    /// pill shouldn't expand; the user must dwell briefly.
+    private let expandIntentDelay: Duration = .milliseconds(150)
+
+    /// Close delay before COMPACTING — a brief exit while reaching across the
+    /// panel shouldn't collapse it, but a genuine leave does. Re-entering cancels
+    /// the pending compact.
+    private let compactCloseDelay: Duration = .milliseconds(300)
+
     /// The screen carrying the menu bar (and the notch, if any).
     private var notchScreen: NSScreen {
         NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 })
@@ -63,6 +76,8 @@ final class NotchWindowManager: NSObject {
     func hide() {
         guard isShown else { return }
         isShown = false
+        hoverTransitionTask?.cancel()
+        hoverTransitionTask = nil
         Task { await notch?.hide() }
     }
 
@@ -87,29 +102,55 @@ final class NotchWindowManager: NSObject {
         )
         notch = dynamicNotch
 
-        // Expand on hover, collapse back to compact on leave (Dynamic Island UX).
+        // Expand on hover, collapse back to compact on leave (Dynamic-Island UX).
+        //
+        // We rely on DynamicNotchKit's own `isHovering` (it already tracks the
+        // panel's true hover bounds and de-dupes via removeDuplicates below), but
+        // we DEBOUNCE both directions to make it intentional and to break the
+        // expand→bigger-window→still-hovering feedback loop:
+        //   • EXPAND only after a short dwell (expandIntentDelay) so passing the
+        //     cursor near the pill doesn't trigger it.
+        //   • COMPACT only after a grace period (compactCloseDelay) so a brief
+        //     exit while reaching across the panel doesn't collapse it; if the
+        //     cursor returns, isHovering flips back to true, which cancels the
+        //     pending compact below.
+        // Each hover change cancels the previous pending task, so stale toggles
+        // near the boundary can't fire.
         hoverCancellable = dynamicNotch.$isHovering
             .removeDuplicates()
             .sink { [weak self] hovering in
-                guard let self else { return }
-                Task { @MainActor in
-                    guard self.isShown, let notch = self.notch else { return }
-                    if hovering {
-                        await notch.expand(on: self.notchScreen)
-                        // FIRST-CLICK FIX: the DynamicNotch panel is a
-                        // .nonactivatingPanel, so the *first* click inside it is
-                        // normally eaten making the window key instead of hitting
-                        // the SwiftUI button (the classic "double click to switch
-                        // tab" bug). By making the panel key the moment the user
-                        // hovers — before they click — the click lands on the tab
-                        // button directly. `acceptsFirstMouse` on the hosting view
-                        // (see FirstMouseView in NotchRootView) covers the rest.
-                        notch.windowController?.window?.makeKey()
-                    } else {
-                        await notch.compact(on: self.notchScreen)
-                    }
-                }
+                self?.scheduleHoverTransition(expand: hovering)
             }
+    }
+
+    /// Debounced hover handler — see the comment at the call site. Cancels any
+    /// in-flight transition, waits the appropriate delay, then re-checks
+    /// `isHovering` so a value that flipped back during the delay is ignored.
+    private func scheduleHoverTransition(expand: Bool) {
+        hoverTransitionTask?.cancel()
+        hoverTransitionTask = Task { @MainActor [weak self] in
+            guard let self, let notch = self.notch else { return }
+            let delay = expand ? self.expandIntentDelay : self.compactCloseDelay
+            try? await Task.sleep(for: delay)
+
+            // Bail if cancelled (a newer hover event arrived), the notch was
+            // hidden, or the hover state no longer matches our intent.
+            guard !Task.isCancelled, self.isShown, notch.isHovering == expand else { return }
+
+            if expand {
+                await notch.expand(on: self.notchScreen)
+                // FIRST-CLICK FIX: the DynamicNotch panel is a .nonactivatingPanel,
+                // so the first click inside it would otherwise be eaten making the
+                // window key instead of hitting the SwiftUI button (the "double
+                // click to switch tab" bug). Make the panel key now — after the
+                // dwell, before the user clicks — so the click lands on the button.
+                // Done after expand() so it doesn't perturb the initial hover
+                // tracking that drives this very transition.
+                notch.windowController?.window?.makeKey()
+            } else {
+                await notch.compact(on: self.notchScreen)
+            }
+        }
     }
 }
 
