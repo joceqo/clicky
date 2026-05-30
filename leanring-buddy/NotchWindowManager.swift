@@ -27,6 +27,28 @@ final class NotchWindowManager: NSObject {
     private var notch: DynamicNotch<AnyView, AnyView, EmptyView>?
     private var isShown = false
     private var hoverCancellable: AnyCancellable?
+    private var voiceStateCancellable: AnyCancellable?
+
+    // MARK: - Response-driven presentation state
+
+    /// True while a response is driving the notch (expanded showing the
+    /// read-along). While set, the hover handler must NOT compact — the response
+    /// owns the expanded state until it ends.
+    private var isRespondingPresentation = false
+
+    /// Snapshot of how the notch looked when a response STARTED, so we can put it
+    /// back when the response ends.
+    private enum PriorPresentation {
+        case hidden    // notch wasn't on screen at all
+        case compact   // pill was showing
+        case expanded  // user had it open browsing tabs
+    }
+    private var presentationBeforeResponse: PriorPresentation = .hidden
+
+    /// Cancellable grace task that restores the notch a beat after a response
+    /// ends (so a quick follow-up response doesn't flap it).
+    private var restoreTask: Task<Void, Never>?
+    private let restoreGraceDelay: Duration = .milliseconds(600)
 
     /// Pending hover-driven transition (cancellable so we can debounce). Only one
     /// is ever in flight; a new hover event cancels the previous pending task.
@@ -54,6 +76,59 @@ final class NotchWindowManager: NSObject {
     /// CompanionManager after init (the manager is created before `self` exists).
     func configure(companionManager: CompanionManager) {
         self.companionManager = companionManager
+
+        // Drive the notch from voice state, independent of hover: when the buddy
+        // starts responding we force-expand the notch to show the read-along;
+        // when it stops we restore the prior state. SwiftUI re-renders the
+        // expanded content (the router below) on the @Published phrase changes.
+        voiceStateCancellable = companionManager.$voiceState
+            .removeDuplicates()
+            .sink { [weak self] state in
+                self?.handleVoiceState(state)
+            }
+    }
+
+    /// `true` when the buddy is actively speaking a response we should render.
+    private func isActivelyResponding(_ state: CompanionVoiceState) -> Bool {
+        guard let companionManager else { return false }
+        return state == .responding && !companionManager.currentResponsePhrases.isEmpty
+    }
+
+    /// Voice-state driven presentation: force-expand the notch to show the
+    /// read-along while the buddy responds, then restore the prior state.
+    private func handleVoiceState(_ state: CompanionVoiceState) {
+        guard let companionManager else { return }
+        if state == .responding {
+            restoreTask?.cancel()
+            restoreTask = nil
+            guard !isRespondingPresentation else { return }
+            // Remember how the notch looked so we can put it back afterwards.
+            presentationBeforeResponse = isShown ? .compact : .hidden
+            isRespondingPresentation = true
+            isShown = true
+            if notch == nil { build(companionManager: companionManager) }
+            Task { await notch?.expand(on: notchScreen) }
+        } else if isRespondingPresentation {
+            isRespondingPresentation = false
+            scheduleRestoreAfterResponse()
+        }
+    }
+
+    /// Restores the notch a beat after a response ends (cancelled if a new
+    /// response starts during the grace window).
+    private func scheduleRestoreAfterResponse() {
+        restoreTask?.cancel()
+        restoreTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: self?.restoreGraceDelay ?? .milliseconds(600))
+            guard let self, !Task.isCancelled, !self.isRespondingPresentation else { return }
+            switch self.presentationBeforeResponse {
+            case .hidden:
+                self.isShown = false
+                await self.notch?.hide()
+            case .compact, .expanded:
+                await self.notch?.compact(on: self.notchScreen)
+            }
+        }
     }
 
     // MARK: - Public API
@@ -91,10 +166,7 @@ final class NotchWindowManager: NSObject {
             hoverBehavior: [.keepVisible, .increaseShadow],
             style: .auto,
             expanded: {
-                AnyView(
-                    NotchRootView(companionManager: companionManager)
-                        .frame(width: 420)
-                )
+                AnyView(NotchExpandedContent(companionManager: companionManager))
             },
             compactLeading: {
                 AnyView(NotchCompactBuddy())
@@ -137,6 +209,9 @@ final class NotchWindowManager: NSObject {
             // hidden, or the hover state no longer matches our intent.
             guard !Task.isCancelled, self.isShown, notch.isHovering == expand else { return }
 
+            // While a response owns the expanded state, never let hover compact it.
+            if !expand, self.isRespondingPresentation { return }
+
             if expand {
                 await notch.expand(on: self.notchScreen)
                 // FIRST-CLICK FIX: the DynamicNotch panel is a .nonactivatingPanel,
@@ -163,5 +238,21 @@ private struct NotchCompactBuddy: View {
         NotchBuddyGlyph()
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
+    }
+}
+
+/// Routes the expanded notch content: the live read-along while the buddy is
+/// responding, otherwise the normal 6-tab shell. SwiftUI re-renders this when
+/// `voiceState` changes, so the swap is automatic.
+private struct NotchExpandedContent: View {
+    @ObservedObject var companionManager: CompanionManager
+
+    var body: some View {
+        if companionManager.voiceState == .responding {
+            NotchResponseReadAlongView(companionManager: companionManager)
+        } else {
+            NotchRootView(companionManager: companionManager)
+                .frame(width: 420)
+        }
     }
 }

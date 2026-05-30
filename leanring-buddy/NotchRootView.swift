@@ -159,11 +159,7 @@ struct NotchRootView: View {
         case .threads:
             NotchThreadsTab(companionManager: companionManager)
         case .notes:
-            NotchComingSoonTab(
-                systemImage: "note.text",
-                title: "Notes",
-                line: "A place for your wiki articles and saved notes. Coming soon."
-            )
+            NotchNotesTab()
         case .crons:
             NotchComingSoonTab(
                 systemImage: "clock.arrow.circlepath",
@@ -171,11 +167,7 @@ struct NotchRootView: View {
                 line: "Scheduled agents that run on a timer. Coming soon."
             )
         case .agents:
-            NotchComingSoonTab(
-                systemImage: "cpu",
-                title: "Agents",
-                line: "Background agent tasks and their activity. Coming soon."
-            )
+            NotchAgentsTab(companionManager: companionManager)
         case .settings:
             NotchSettingsTab(companionManager: companionManager)
         }

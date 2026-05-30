@@ -94,70 +94,32 @@ struct ResponseBubbleSizePreferenceKey: PreferenceKey {
 
 // MARK: - Phrase Highlight Response Bubble
 
-/// Shows the full response text split into phrases. The currently-playing
-/// phrase is rendered at full brightness; already-spoken phrases are slightly
-/// dimmed and upcoming phrases are more dimmed, giving a live progress feel.
-private struct ResponseContentHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
-}
-
+/// The floating cursor read-along bubble (non-notch Macs). Thin wrapper that
+/// gives the shared `ReadAlongView` (see NotchTabs/NotchReadAlongView.swift) the
+/// bubble chrome — rounded surface + shadow — so the highlight/auto-scroll logic
+/// stays in ONE place shared with the notch surface. On notched Macs this bubble
+/// is suppressed and the notch shows the read-along instead (see the call site).
 private struct PhraseHighlightResponseBubbleView: View {
     let phrases: [String]
     let activePhraseIndex: Int?
 
-    @State private var contentHeight: CGFloat = 0
-    private let maxBubbleHeight: CGFloat = 340
-
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(Array(phrases.enumerated()), id: \.offset) { index, phrase in
-                        Text(phrase)
-                            .font(.system(size: 12, weight: index == activePhraseIndex ? .semibold : .regular))
-                            .foregroundColor(DS.Colors.textPrimary.opacity(phraseTextOpacity(forIndex: index)))
-                            .lineSpacing(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .id(index)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    GeometryReader { geo in
-                        Color.clear.preference(key: ResponseContentHeightKey.self, value: geo.size.height)
-                    }
+        ReadAlongView(
+            phrases: phrases,
+            activePhraseIndex: activePhraseIndex,
+            width: 304,
+            maxHeight: 340,
+            fontSize: 12
+        )
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(DS.Colors.surface1.opacity(0.95))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle.opacity(0.4), lineWidth: 0.8)
                 )
-            }
-            // Bubble = content height capped at maxBubbleHeight, so it grows with the
-            // text but never overflows; the ScrollView scrolls past that.
-            .frame(width: 304, height: min(contentHeight, maxBubbleHeight))
-            .onPreferenceChange(ResponseContentHeightKey.self) { contentHeight = $0 }
-            .onChange(of: activePhraseIndex) { _, newIndex in
-                guard let newIndex else { return }
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    proxy.scrollTo(newIndex, anchor: .center)
-                }
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(DS.Colors.surface1.opacity(0.95))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(DS.Colors.borderSubtle.opacity(0.4), lineWidth: 0.8)
-                    )
-                    .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 6)
-            )
-        }
-    }
-
-    private func phraseTextOpacity(forIndex index: Int) -> Double {
-        guard let activeIndex = activePhraseIndex else { return 1.0 }
-        if index == activeIndex { return 1.0 }
-        if index < activeIndex { return 0.45 }  // already spoken
-        return 0.30                              // not yet spoken
+                .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 6)
+        )
     }
 }
 
@@ -182,6 +144,13 @@ struct BlueCursorView: View {
     let screenFrame: CGRect
     let isFirstAppearance: Bool
     @ObservedObject var companionManager: CompanionManager
+
+    /// True when any attached display has a notch (a non-zero top safe-area
+    /// inset). On such Macs the read-along is shown in the notch, so the floating
+    /// cursor bubble is suppressed; on non-notch Macs the bubble is the fallback.
+    static var hasNotchedDisplay: Bool {
+        NSScreen.screens.contains(where: { $0.safeAreaInsets.top > 0 })
+    }
 
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
@@ -283,8 +252,8 @@ struct BlueCursorView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
-                            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.5), radius: 6, x: 0, y: 0)
+                            .fill(buddyCursorColor)
+                            .shadow(color: buddyCursorColor.opacity(0.5), radius: 6, x: 0, y: 0)
                     )
                     .fixedSize()
                     .overlay(
@@ -327,8 +296,8 @@ struct BlueCursorView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
-                            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.5), radius: 6, x: 0, y: 0)
+                            .fill(buddyCursorColor)
+                            .shadow(color: buddyCursorColor.opacity(0.5), radius: 6, x: 0, y: 0)
                     )
                     .fixedSize()
                     .overlay(
@@ -357,9 +326,9 @@ struct BlueCursorView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(DS.Colors.overlayCursorBlue)
+                            .fill(buddyCursorColor)
                             .shadow(
-                                color: DS.Colors.overlayCursorBlue.opacity(0.5 + (1.0 - navigationBubbleScale) * 1.0),
+                                color: buddyCursorColor.opacity(0.5 + (1.0 - navigationBubbleScale) * 1.0),
                                 radius: 6 + (1.0 - navigationBubbleScale) * 16,
                                 x: 0, y: 0
                             )
@@ -385,7 +354,11 @@ struct BlueCursorView: View {
             // Response phrase highlight bubble — shown during TTS playback (.responding state).
             // Renders all response sentences with the currently-speaking one highlighted.
             // Positioned to the right of and just below the cursor, same as other bubbles.
+            // On notched Macs the notch shows the read-along instead, so the
+            // floating bubble is suppressed there (the user chose "replace with
+            // the notch"). On non-notch Macs it remains the fallback surface.
             if isCursorOnThisScreen
+               && !Self.hasNotchedDisplay
                && companionManager.voiceState == .responding
                && !companionManager.currentResponsePhrases.isEmpty {
                 PhraseHighlightResponseBubbleView(
@@ -822,6 +795,9 @@ struct BlueCursorView: View {
 private struct BlueCursorWaveformView: View {
     let audioPowerLevel: CGFloat
 
+    @AppStorage(buddyCursorColorKey) private var buddyCursorColorRaw: String = BuddyCursorColor.blue.rawValue
+    private var buddyCursorColor: Color { (BuddyCursorColor(rawValue: buddyCursorColorRaw) ?? .blue).color }
+
     private let barCount = 5
     private let listeningBarProfile: [CGFloat] = [0.4, 0.7, 1.0, 0.7, 0.4]
 
@@ -830,7 +806,7 @@ private struct BlueCursorWaveformView: View {
             HStack(alignment: .center, spacing: 2) {
                 ForEach(0..<barCount, id: \.self) { barIndex in
                     RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(DS.Colors.overlayCursorBlue)
+                        .fill(buddyCursorColor)
                         .frame(
                             width: 2,
                             height: barHeight(
@@ -840,7 +816,7 @@ private struct BlueCursorWaveformView: View {
                         )
                 }
             }
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
+            .shadow(color: buddyCursorColor.opacity(0.6), radius: 6, x: 0, y: 0)
             .animation(.linear(duration: 0.08), value: audioPowerLevel)
         }
     }
@@ -862,14 +838,17 @@ private struct BlueCursorWaveformView: View {
 private struct BlueCursorSpinnerView: View {
     @State private var isSpinning = false
 
+    @AppStorage(buddyCursorColorKey) private var buddyCursorColorRaw: String = BuddyCursorColor.blue.rawValue
+    private var buddyCursorColor: Color { (BuddyCursorColor(rawValue: buddyCursorColorRaw) ?? .blue).color }
+
     var body: some View {
         Circle()
             .trim(from: 0.15, to: 0.85)
             .stroke(
                 AngularGradient(
                     colors: [
-                        DS.Colors.overlayCursorBlue.opacity(0.0),
-                        DS.Colors.overlayCursorBlue
+                        buddyCursorColor.opacity(0.0),
+                        buddyCursorColor
                     ],
                     center: .center
                 ),
@@ -877,7 +856,7 @@ private struct BlueCursorSpinnerView: View {
             )
             .frame(width: 14, height: 14)
             .rotationEffect(.degrees(isSpinning ? 360 : 0))
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
+            .shadow(color: buddyCursorColor.opacity(0.6), radius: 6, x: 0, y: 0)
             .onAppear {
                 withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
                     isSpinning = true
