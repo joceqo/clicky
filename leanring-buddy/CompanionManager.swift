@@ -364,6 +364,24 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    /// Whether the cursor buddy is DOCKED — parked at the notch anchor instead
+    /// of following the mouse. DISTINCT from "Show in Dock" (DockVisibility, the
+    /// macOS Dock icon). Observed by OverlayWindow's BlueCursorView, which flies
+    /// the buddy to the anchor and suppresses mouse-follow while docked. Persisted
+    /// to UserDefaults (`buddyCursorDockedKey`) so it survives relaunch.
+    @Published var isCursorDocked: Bool = UserDefaults.standard.bool(forKey: buddyCursorDockedKey)
+
+    /// Toggles the cursor dock state and persists it. BlueCursorView reacts to
+    /// the published change (fly-to-anchor on dock, fly-back + resume on undock).
+    func toggleCursorDock() {
+        setCursorDocked(!isCursorDocked)
+    }
+
+    func setCursorDocked(_ docked: Bool) {
+        isCursorDocked = docked
+        UserDefaults.standard.set(docked, forKey: buddyCursorDockedKey)
+    }
+
     /// Whether the user has completed onboarding at least once. Persisted
     /// to UserDefaults so the Start button only appears on first launch.
     var hasCompletedOnboarding: Bool {
