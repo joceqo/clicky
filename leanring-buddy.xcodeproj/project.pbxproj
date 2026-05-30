@@ -11,6 +11,7 @@
 		AA00BB062F6500060039DA55 /* PostHog in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB052F6500050039DA55 /* PostHog */; };
 		AA00BB122F6500120039DA55 /* Permiso in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB112F6500110039DA55 /* Permiso */; };
 		AA00BB222F6500220039DA55 /* BackgroundComputerUseKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB212F6500210039DA55 /* BackgroundComputerUseKit */; };
+		AA00BB322F6500320039DA55 /* DynamicNotchKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB312F6500310039DA55 /* DynamicNotchKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -63,6 +64,7 @@
 				AA00BB062F6500060039DA55 /* PostHog in Frameworks */,
 				AA00BB122F6500120039DA55 /* Permiso in Frameworks */,
 				AA00BB222F6500220039DA55 /* BackgroundComputerUseKit in Frameworks */,
+				AA00BB322F6500320039DA55 /* DynamicNotchKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -127,6 +129,7 @@
 				AA00BB052F6500050039DA55 /* PostHog */,
 				AA00BB112F6500110039DA55 /* Permiso */,
 				AA00BB212F6500210039DA55 /* BackgroundComputerUseKit */,
+				AA00BB312F6500310039DA55 /* DynamicNotchKit */,
 			);
 			productName = "leanring-buddy";
 			productReference = 28F22CBF2F56440300A0FC59 /* Clicky.app */;
@@ -215,6 +218,7 @@
 				AA00BB042F6500040039DA55 /* XCRemoteSwiftPackageReference "posthog-ios" */,
 				AA00BB102F6500100039DA55 /* XCRemoteSwiftPackageReference "permiso" */,
 				AA00BB202F6500200039DA55 /* XCRemoteSwiftPackageReference "background-computer-use" */,
+				AA00BB302F6500300039DA55 /* XCRemoteSwiftPackageReference "DynamicNotchKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 28F22CC02F56440300A0FC59 /* Products */;
@@ -640,6 +644,14 @@
 				version = 0.1.0;
 			};
 		};
+		AA00BB302F6500300039DA55 /* XCRemoteSwiftPackageReference "DynamicNotchKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/mrkai77/DynamicNotchKit";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.1.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -662,6 +674,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA00BB202F6500200039DA55 /* XCRemoteSwiftPackageReference "background-computer-use" */;
 			productName = BackgroundComputerUseKit;
+		};
+		AA00BB312F6500310039DA55 /* DynamicNotchKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA00BB302F6500300039DA55 /* XCRemoteSwiftPackageReference "DynamicNotchKit" */;
+			productName = DynamicNotchKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
