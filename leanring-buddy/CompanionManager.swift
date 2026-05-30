@@ -76,9 +76,14 @@ final class CompanionManager: ObservableObject {
         ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
     }()
 
-    private lazy var ttsClient: any TTSClient = {
-        ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
-    }()
+    /// Active TTS backend. Resolved from TTSProviderSettings at startup and replaced
+    /// immediately when the user changes the TTS provider in Settings.
+    private var ttsClient: any TTSClient = SystemTTSClient()
+
+    /// The current TTS provider settings, persisted to UserDefaults.
+    @Published var ttsProviderSettings: TTSProviderSettings = TTSProviderFactory.loadSettings() {
+        didSet { applyTTSProviderSettings() }
+    }
 
     /// Index of the phrase currently being spoken by TTS (into `currentResponsePhrases`).
     /// Observed by BlueCursorView to highlight the active sentence in the response bubble.
@@ -122,6 +127,20 @@ final class CompanionManager: ObservableObject {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
         brainClient.model = model
+    }
+
+    /// Applies the current `ttsProviderSettings` by rebuilding the TTS client.
+    /// Stops any in-progress playback first so the swap is clean.
+    private func applyTTSProviderSettings() {
+        ttsClient.stopPlayback()
+        currentResponsePhrases = []
+        currentlySpeakingPhraseIndex = nil
+        ttsClient = TTSProviderFactory.makeClient(
+            settings: ttsProviderSettings,
+            elevenLabsProxyURL: "\(Self.workerBaseURL)/tts"
+        )
+        TTSProviderFactory.saveSettings(ttsProviderSettings)
+        print("🔊 TTS provider: \(ttsProviderSettings.providerType.displayName)")
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -190,6 +209,8 @@ final class CompanionManager: ObservableObject {
         // Eagerly init the brain client so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = brainClient
+        // Apply persisted TTS settings now that the worker URL is known.
+        applyTTSProviderSettings()
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
