@@ -22,6 +22,8 @@ struct OpenCodeModelInfo: Identifiable, Hashable {
     let hasVision: Bool
     let hasReasoning: Bool
     let hasTools: Bool
+    /// True when the model's cost is 0 in/out (e.g. the hosted `opencode/*-free` models).
+    let isFree: Bool
 
     /// "providerID/modelID" — the selector the brain client / server expects.
     var id: String { "\(providerID)/\(modelID)" }
@@ -74,9 +76,15 @@ enum OpenCodeModelCatalog {
                 let hasVision = (input?["image"] as? Bool) ?? false
                 let hasReasoning = (caps?["reasoning"] as? Bool) ?? false
                 let hasTools = (caps?["toolcall"] as? Bool) ?? false
+                // Free = cost present and 0 in/out. Absent cost → treated as paid (conservative).
+                let cost = model["cost"] as? [String: Any]
+                let costIn = (cost?["input"] as? NSNumber)?.doubleValue ?? -1
+                let costOut = (cost?["output"] as? NSNumber)?.doubleValue ?? -1
+                let isFree = costIn == 0 && costOut == 0
                 results.append(OpenCodeModelInfo(
                     providerID: providerID, modelID: modelID, name: name,
-                    hasVision: hasVision, hasReasoning: hasReasoning, hasTools: hasTools
+                    hasVision: hasVision, hasReasoning: hasReasoning, hasTools: hasTools,
+                    isFree: isFree
                 ))
             }
         }

@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var openCodeModels: [OpenCodeModelInfo] = []
     @State private var openCodeModelsLoading = false
     @State private var openCodeModelsError: String?
+    @State private var openCodeFreeOnly = true
 
     var body: some View {
         Form {
@@ -124,10 +125,12 @@ struct SettingsView: View {
                     // Fallback before models are loaded (or if loading fails): type the slug.
                     TextField("Model (providerID/modelID — empty = server default)", text: $companionManager.brainProviderSettings.openCodeModel)
                 } else {
+                    Toggle("Free models only (no API key needed)", isOn: $openCodeFreeOnly)
+                    let shownModels = openCodeFreeOnly ? openCodeModels.filter(\.isFree) : openCodeModels
                     Picker("Model", selection: $companionManager.brainProviderSettings.openCodeModel) {
                         Text("Server default").tag("")
-                        ForEach(openCodeModels) { model in
-                            Text(model.menuLabel).tag(model.id)
+                        ForEach(shownModels) { model in
+                            Text(model.isFree ? "\(model.menuLabel)  · free" : model.menuLabel).tag(model.id)
                         }
                     }
                     if let selected = openCodeModels.first(where: { $0.id == companionManager.brainProviderSettings.openCodeModel }) {
