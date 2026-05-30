@@ -73,8 +73,9 @@ extension TTSProviderSettings {
         )
     }
 
-    /// Mistral Voxtral (requires API key)
-    static func voxtral(apiKey: String, voice: String = "nova") -> TTSProviderSettings {
+    /// Mistral TTS (requires API key). NOTE: this is Mistral's text-to-speech,
+    /// NOT Voxtral — Voxtral is Mistral's speech-to-text model (see STTProviderSettings).
+    static func mistral(apiKey: String, voice: String = "en_paul_neutral") -> TTSProviderSettings {
         TTSProviderSettings(
             providerType: .openAICompat,
             openAICompatBaseURL: "https://api.mistral.ai",

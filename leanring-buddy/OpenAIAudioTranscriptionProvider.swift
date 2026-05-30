@@ -183,9 +183,12 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
     }
 
     func cancel() {
-        stateQueue.async {
-            self.isCancelled = true
-            self.bufferedPCM16AudioData.removeAll(keepingCapacity: false)
+        // [weak self] is essential: cancel() is also called from deinit, and a
+        // strong self capture in an escaping async block during deallocation
+        // resurrects a zero-refcount object → swift_deallocClassInstance fatalError.
+        stateQueue.async { [weak self] in
+            self?.isCancelled = true
+            self?.bufferedPCM16AudioData.removeAll(keepingCapacity: false)
         }
 
         transcriptionUploadTask?.cancel()
@@ -335,7 +338,10 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
     }
 
     deinit {
-        cancel()
+        // Only synchronous, non-self-escaping teardown here. Do NOT call cancel()
+        // (its stateQueue.async would re-reference self mid-deallocation and crash).
+        transcriptionUploadTask?.cancel()
+        urlSession.invalidateAndCancel()
     }
 }
 

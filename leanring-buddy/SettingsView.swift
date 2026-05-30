@@ -162,6 +162,11 @@ struct SettingsView: View {
                             apiKey: companionManager.ttsProviderSettings.openAICompatAPIKey
                         )
                     }
+                    Button("Mistral") {
+                        companionManager.ttsProviderSettings = .mistral(
+                            apiKey: companionManager.ttsProviderSettings.openAICompatAPIKey
+                        )
+                    }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
