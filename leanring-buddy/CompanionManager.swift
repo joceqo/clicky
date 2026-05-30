@@ -93,6 +93,12 @@ final class CompanionManager: ObservableObject {
         didSet { applyTTSProviderSettings() }
     }
 
+    /// The current STT (speech-to-text) provider settings, persisted to UserDefaults.
+    /// Changing this live-swaps the dictation manager's transcription backend.
+    @Published var sttProviderSettings: STTProviderSettings = STTProviderFactory.loadSettings() {
+        didSet { applySTTProviderSettings() }
+    }
+
     /// Index of the phrase currently being spoken by TTS (into `currentResponsePhrases`).
     /// Observed by BlueCursorView to highlight the active sentence in the response bubble.
     @Published private(set) var currentlySpeakingPhraseIndex: Int? = nil
@@ -149,6 +155,14 @@ final class CompanionManager: ObservableObject {
         )
         TTSProviderFactory.saveSettings(ttsProviderSettings)
         print("🔊 TTS provider: \(ttsProviderSettings.providerType.displayName)")
+    }
+
+    /// Applies the current `sttProviderSettings` by live-swapping the dictation
+    /// manager's transcription provider. Cancels any in-flight session first.
+    private func applySTTProviderSettings() {
+        buddyDictationManager.rebuildTranscriptionProvider(from: sttProviderSettings)
+        STTProviderFactory.saveSettings(sttProviderSettings)
+        print("🎙️ STT provider: \(sttProviderSettings.providerType.displayName)")
     }
 
     /// Applies the current `brainProviderSettings` by rebuilding the brain client.
