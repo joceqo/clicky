@@ -41,7 +41,7 @@ struct NotchAgentsTab: View {
                 serverCard
             }
         }
-        .frame(maxHeight: 420)
+        .frame(maxHeight: 340)
         .sheet(item: selectedRunBinding) { run in
             AgentRunDetailView(
                 runID: run.id,

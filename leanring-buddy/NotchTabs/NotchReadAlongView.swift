@@ -108,8 +108,8 @@ struct NotchResponseReadAlongView: View {
         }
         .padding(DS.Spacing.md)
         .frame(width: 420)
-        .background(DS.Colors.background)
-        .clickyPanelBackground(cornerRadius: DS.CornerRadius.extraLarge)
+        // No custom background — DynamicNotchKit's seamless notch shape is the
+        // surface (same as NotchRootView).
     }
 
     private var header: some View {

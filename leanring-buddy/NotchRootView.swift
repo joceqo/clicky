@@ -43,23 +43,34 @@ struct NotchRootView: View {
     @ObservedObject var companionManager: CompanionManager
     @State private var selectedTab: NotchTab = .home
 
+    /// Extra top room so the tab bar clears the physical notch (≈ the notch
+    /// screen's top safe-area inset; 0 on Macs without a notch).
+    private var notchTopClearance: CGFloat {
+        CursorDock.dockScreen.safeAreaInsets.top
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
                 .padding(.horizontal, DS.Spacing.sm)
-                .padding(.top, DS.Spacing.sm)
+                .padding(.top, DS.Spacing.sm + notchTopClearance)
 
             Divider()
                 .background(DS.Colors.borderSubtle)
                 .padding(.top, DS.Spacing.sm)
 
+            // Each tab owns its OWN scroll (capped to fit the notch window), so
+            // there is no outer ScrollView here — wrapping one would nest two
+            // scroll views on tabs that already scroll (Agents/Notes/etc.).
             content
                 .frame(maxWidth: .infinity, alignment: .topLeading)
                 .padding(DS.Spacing.lg)
         }
         .frame(width: 420)
-        .background(DS.Colors.background)
-        .clickyPanelBackground(cornerRadius: DS.CornerRadius.extraLarge)
+        // No custom background: DynamicNotchKit draws the seamless black notch
+        // shape (NotchShape) behind this content so the panel reads as the notch
+        // itself growing to contain the menu — adding our own rounded panel here
+        // would float a second surface inside the notch.
     }
 
     // MARK: - Header (continuous buddy glyph + compact tab bar)

@@ -589,10 +589,12 @@ struct BlueCursorView: View {
             if companionManager.detectedElementScreenLocation != nil {
                 return false
             }
-            // DOCKED: the buddy lives on the dock screen (parked at the anchor),
-            // regardless of where the mouse is. On non-dock screens it's hidden.
+            // DOCKED + settled: the buddy has flown into the notch and is now
+            // tucked away ("in its kennel") — hide the desktop cursor entirely.
+            // The fly-IN itself is the .navigatingToTarget case below (visible),
+            // so you still see it travel to the notch before it vanishes.
             if companionManager.isCursorDocked {
-                return isDockScreen
+                return false
             }
             return isCursorOnThisScreen
         case .navigatingToTarget, .pointingAtTarget:

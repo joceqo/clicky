@@ -31,7 +31,8 @@ struct NotchHomeTab: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.md) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: DS.Spacing.md) {
             // Push-to-talk hint (two lines, matching 4011).
             talkHint
 
@@ -63,7 +64,9 @@ struct NotchHomeTab: View {
 
             // Show-in-Dock (macOS Dock icon) — distinct from the cursor dock above.
             showInDockButton
+            }
         }
+        .frame(maxHeight: 340)
     }
 
     // MARK: - Talk hint
