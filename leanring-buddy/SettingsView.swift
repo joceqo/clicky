@@ -59,7 +59,7 @@ struct SettingsView: View {
                 TextField("Base URL", text: $companionManager.brainProviderSettings.openAICompatBaseURL)
                     .textContentType(.URL)
                 TextField("Model (must be a vision model)", text: $companionManager.brainProviderSettings.openAICompatModel)
-                SecureField("API key (leave empty for local)", text: $companionManager.brainProviderSettings.openAICompatAPIKey)
+                APIKeyField(title: "API key (leave empty for local)", key: $companionManager.brainProviderSettings.openAICompatAPIKey)
 
                 Text("The brain sees your screen → pick a vision model (Qwen-VL, Gemma 3 4B+). LM Studio default: http://localhost:1234")
                     .font(.caption)
@@ -123,7 +123,7 @@ struct SettingsView: View {
                 TextField("Base URL", text: $companionManager.sttProviderSettings.openAICompatBaseURL)
                     .textContentType(.URL)
                 TextField("Model", text: $companionManager.sttProviderSettings.openAICompatModel)
-                SecureField("API key (leave empty for local)", text: $companionManager.sttProviderSettings.openAICompatAPIKey)
+                APIKeyField(title: "API key (leave empty for local)", key: $companionManager.sttProviderSettings.openAICompatAPIKey)
 
                 Text("Any /v1/audio/transcriptions endpoint (Voxtral, OpenAI Whisper, Voicebox, LM Studio). STT needs only a URL, key, and model — there is no voice to set. Voicebox default: http://127.0.0.1:8880")
                     .font(.caption)
@@ -175,7 +175,7 @@ struct SettingsView: View {
                     .textContentType(.URL)
                 TextField("Model", text: $companionManager.ttsProviderSettings.openAICompatModel)
                 TextField("Voice", text: $companionManager.ttsProviderSettings.openAICompatVoice)
-                SecureField("API key (leave empty for local)", text: $companionManager.ttsProviderSettings.openAICompatAPIKey)
+                APIKeyField(title: "API key (leave empty for local)", key: $companionManager.ttsProviderSettings.openAICompatAPIKey)
             } else if companionManager.ttsProviderSettings.providerType == .elevenLabs {
                 Text("Uses the Cloudflare Worker proxy configured in code.")
                     .font(.caption)
@@ -185,6 +185,40 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+// MARK: - API key field
+
+/// Single-line API-key input with a reveal (eye) toggle. Avoids the multi-line
+/// behaviour of a bare TextField and lets the user verify what they pasted.
+private struct APIKeyField: View {
+    let title: String
+    @Binding var key: String
+    @State private var isRevealed = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Group {
+                if isRevealed {
+                    TextField(title, text: $key)
+                } else {
+                    SecureField(title, text: $key)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
+            .lineLimit(1)
+            .autocorrectionDisabled()
+            .textContentType(.password)
+
+            Button {
+                isRevealed.toggle()
+            } label: {
+                Image(systemName: isRevealed ? "eye.slash" : "eye")
+            }
+            .buttonStyle(.borderless)
+            .help(isRevealed ? "Hide" : "Show")
         }
     }
 }
