@@ -8,6 +8,7 @@
 //  baseURL + model + voice + optional API key in Settings.
 //
 
+import AppKit
 import AVFoundation
 import Foundation
 

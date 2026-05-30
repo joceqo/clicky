@@ -16,6 +16,11 @@
 import Foundation
 import SQLite3
 
+// SQLite's SQLITE_TRANSIENT macro isn't imported into Swift, so define it here.
+// It tells SQLite to copy bound text/blobs immediately rather than hold the
+// pointer (which would dangle once the Swift String is freed after the call).
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 actor RuntimeStore {
 
     // MARK: - Internal state
@@ -88,6 +93,17 @@ actor RuntimeStore {
             );
         """)
         try exec("CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, sequence_number);")
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS commands (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                issued_at REAL NOT NULL,
+                command_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}'
+            );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_commands_session ON commands(session_id, issued_at);")
 
         try exec("""
             CREATE TABLE IF NOT EXISTS tool_calls (
@@ -206,6 +222,25 @@ actor RuntimeStore {
             }
         }
         return results
+    }
+
+    // MARK: - Commands
+
+    func appendCommandEnvelope(_ envelope: RuntimeCommandEnvelope) throws {
+        let sql = """
+            INSERT INTO commands (id, session_id, issued_at, command_type, payload_json)
+            VALUES (?, ?, ?, ?, ?);
+        """
+        try prepare(sql) { stmt in
+            sqlite3_bind_text(stmt, 1, envelope.id, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, envelope.sessionId, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_double(stmt, 3, envelope.issuedAt.timeIntervalSince1970)
+            sqlite3_bind_text(stmt, 4, envelope.commandType.rawValue, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 5, envelope.payloadJSON, -1, SQLITE_TRANSIENT)
+            guard sqlite3_step(stmt) == SQLITE_DONE else {
+                throw RuntimeStoreError.writeFailed(lastErrorMessage())
+            }
+        }
     }
 
     // MARK: - Events

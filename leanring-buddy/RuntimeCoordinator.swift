@@ -386,33 +386,3 @@ final class RuntimeCoordinator: ObservableObject {
         activeHarness = harness
     }
 }
-
-// MARK: - RuntimeStore command envelope support
-
-extension RuntimeStore {
-    /// Persists a command envelope to a `commands` table (created lazily).
-    func appendCommandEnvelope(_ envelope: RuntimeCommandEnvelope) async throws {
-        // Commands table created on first use — not part of the core schema
-        // because it's optional audit log data.
-        try exec("""
-            CREATE TABLE IF NOT EXISTS commands (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                issued_at REAL NOT NULL,
-                command_type TEXT NOT NULL,
-                payload_json TEXT NOT NULL DEFAULT '{}'
-            );
-        """)
-        let sql = "INSERT INTO commands (id, session_id, issued_at, command_type, payload_json) VALUES (?, ?, ?, ?, ?);"
-        try prepare(sql) { stmt in
-            sqlite3_bind_text(stmt, 1, envelope.id, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 2, envelope.sessionId, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_double(stmt, 3, envelope.issuedAt.timeIntervalSince1970)
-            sqlite3_bind_text(stmt, 4, envelope.commandType.rawValue, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 5, envelope.payloadJSON, -1, SQLITE_TRANSIENT)
-            guard sqlite3_step(stmt) == SQLITE_DONE else {
-                throw RuntimeStoreError.writeFailed(lastErrorMessage())
-            }
-        }
-    }
-}

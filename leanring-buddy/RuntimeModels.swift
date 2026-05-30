@@ -259,6 +259,18 @@ struct RuntimeEventEnvelope: Codable, Identifiable {
         encoder.dateEncodingStrategy = .iso8601
         self.payloadJSON = String(data: try encoder.encode(event), encoding: .utf8) ?? "{}"
     }
+
+    /// Memberwise init used to rehydrate an envelope from the store. The custom
+    /// throwing init above suppresses the implicit memberwise init, so define it.
+    init(id: String, sessionId: String, occurredAt: Date, sequenceNumber: Int,
+         eventType: RuntimeEventType, payloadJSON: String) {
+        self.id = id
+        self.sessionId = sessionId
+        self.occurredAt = occurredAt
+        self.sequenceNumber = sequenceNumber
+        self.eventType = eventType
+        self.payloadJSON = payloadJSON
+    }
 }
 
 enum RuntimeEventType: String, Codable {

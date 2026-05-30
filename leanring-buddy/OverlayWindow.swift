@@ -183,9 +183,10 @@ struct BlueCursorView: View {
     /// The buddy's current behavioral mode (following cursor, navigating, or pointing).
     @State private var buddyNavigationMode: BuddyNavigationMode = .followingCursor
 
-    /// The rotation angle of the triangle in degrees. Default is -35° (cursor-like).
+    /// The rotation angle of the triangle in degrees. Default is +35° — mirrored
+    /// from Clicky's -35° so joceclicky's cursor has its own distinct identity.
     /// Changes to face the direction of travel when navigating to a target.
-    @State private var triangleRotationDegrees: Double = -35.0
+    @State private var triangleRotationDegrees: Double = 35.0
 
     /// Speech bubble text shown when pointing at a detected element.
     @State private var navigationBubbleText: String = ""
@@ -652,7 +653,7 @@ struct BlueCursorView: View {
         buddyNavigationMode = .pointingAtTarget
 
         // Rotate back to default pointer angle now that we've arrived
-        triangleRotationDegrees = -35.0
+        triangleRotationDegrees = 35.0
 
         // Reset navigation bubble state — start small for the scale-bounce entrance
         navigationBubbleText = ""
@@ -743,7 +744,7 @@ struct BlueCursorView: View {
         navigationAnimationTimer = nil
         buddyNavigationMode = .followingCursor
         isReturningToCursor = false
-        triangleRotationDegrees = -35.0
+        triangleRotationDegrees = 35.0
         buddyFlightScale = 1.0
         navigationBubbleText = ""
         navigationBubbleOpacity = 0.0
