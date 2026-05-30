@@ -29,6 +29,12 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 12)
 
+                openChatButton
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 8)
+
                 openSettingsButton
                     .padding(.horizontal, 16)
             }
@@ -401,6 +407,30 @@ struct CompanionPanelView: View {
         }
         .buttonStyle(.plain)
         .pointerCursor()
+    }
+
+    // MARK: - Open Chat Button
+
+    private var openChatButton: some View {
+        Button(action: {
+            companionManager.openChatWindow()
+        }) {
+            HStack(spacing: 8) {
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .font(.system(size: 12, weight: .medium))
+                Text("Open chat")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+            }
+            .foregroundColor(DS.Colors.textSecondary)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .background(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.medium)
+                    .fill(DS.Colors.surface2)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Open Settings Button
