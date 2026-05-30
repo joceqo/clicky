@@ -18,6 +18,12 @@ struct SettingsView: View {
     @State private var openCodeModelsError: String?
     @State private var openCodeFreeOnly = true
 
+    /// Persisted choice between the CGEvent executor (default) and the precise
+    /// background BackgroundComputerUseKit executor. Read at CompanionManager
+    /// init, so the change takes effect on next launch.
+    @AppStorage(CompanionManager.useBackgroundComputerUseKey)
+    private var useBackgroundComputerUse = false
+
     var body: some View {
         Form {
             brainSection
@@ -172,6 +178,11 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Toggle("Precise background click (experimental)", isOn: $useBackgroundComputerUse)
+            Text("Clicks the target window in the background via Accessibility — no pointer takeover. Off uses the classic CGEvent click that moves the real cursor. Takes effect on next launch.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

@@ -75,8 +75,17 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
 
+    /// UserDefaults key backing the executor choice. When true, clicks route
+    /// through `BackgroundComputerUseActionExecutor` (precise, window-targeted,
+    /// no pointer takeover). Defaults to false → `CGEventActionExecutor`.
+    static let useBackgroundComputerUseKey = "useBackgroundComputerUse"
+
     /// Turns the brain's pointed location into a real interaction (computer use).
-    let actionExecutor: ActionExecutor = CGEventActionExecutor()
+    /// Selected once at init from the persisted toggle. CGEvent stays the default
+    /// so nothing regresses; the experimental background executor is opt-in.
+    let actionExecutor: ActionExecutor = UserDefaults.standard.bool(forKey: CompanionManager.useBackgroundComputerUseKey)
+        ? BackgroundComputerUseActionExecutor()
+        : CGEventActionExecutor()
     let overlayWindowManager = OverlayWindowManager()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
