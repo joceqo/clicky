@@ -222,6 +222,22 @@ struct BlueCursorView: View {
     /// Only during the return flight can cursor movement cancel the animation.
     @State private var isReturningToCursor: Bool = false
 
+    // MARK: - Cursor Dock State
+
+    /// True once the buddy has finished flying to the dock anchor and is PARKED
+    /// there. While parked, the tracking timer stops applying mouse-follow updates
+    /// to `cursorPosition` so the buddy stays at the anchor. Reset when undocking.
+    /// This is the "resting behavior" governed by docking — it does NOT interfere
+    /// with the element-navigation flight (pointing), which still runs normally.
+    @State private var isParkedAtDock: Bool = false
+
+    /// Whether THIS screen is the dock screen (where the buddy parks). Only the
+    /// dock screen runs the dock flight + shows the parked buddy, so we never get
+    /// two parked buddies on a multi-display setup.
+    private var isDockScreen: Bool {
+        screenFrame == CursorDock.dockScreen.frame
+    }
+
     // MARK: - Onboarding Video Layout
 
     private let onboardingVideoPlayerWidth: CGFloat = 330
@@ -436,6 +452,14 @@ struct BlueCursorView: View {
 
             startTrackingCursor()
 
+            // If the buddy was already docked at launch, park it at the anchor
+            // immediately (no flight) so a relaunch restores the docked rest state.
+            if companionManager.isCursorDocked && isDockScreen {
+                isParkedAtDock = true
+                self.cursorPosition = dockAnchorInSwiftUI()
+                self.triangleRotationDegrees = 35.0
+            }
+
             // Only show welcome message on first appearance (app start)
             // and only if the cursor starts on this screen
             if isFirstAppearance && isCursorOnThisScreen {
@@ -471,6 +495,84 @@ struct BlueCursorView: View {
 
             startNavigatingToElement(screenLocation: screenLocation)
         }
+        .onChange(of: companionManager.isCursorDocked) { docked in
+            handleCursorDockChange(docked: docked)
+        }
+    }
+
+    // MARK: - Cursor Docking
+
+    /// The dock anchor expressed in THIS screen's SwiftUI coordinates.
+    private func dockAnchorInSwiftUI() -> CGPoint {
+        let anchorScreenPoint = CursorDock.anchorScreenPoint(on: CursorDock.dockScreen)
+        return convertScreenPointToSwiftUICoordinates(anchorScreenPoint)
+    }
+
+    /// Reacts to the docked state toggling. Reuses the element-navigation flight
+    /// machinery: dock → fly to the notch anchor then PARK; undock → fly from the
+    /// anchor back to the mouse then RESUME following.
+    private func handleCursorDockChange(docked: Bool) {
+        // Only the dock screen runs the dock/undock flight + parking.
+        guard isDockScreen else {
+            // Non-dock screens just make sure they're not stuck parked.
+            isParkedAtDock = false
+            return
+        }
+
+        // Don't fight an in-progress element navigation/pointing flight — docking
+        // only governs the RESTING state. Cancel any element flight first so the
+        // dock flight starts from a clean state.
+        navigationAnimationTimer?.invalidate()
+        navigationAnimationTimer = nil
+        navigationBubbleText = ""
+        navigationBubbleOpacity = 0.0
+
+        if docked {
+            flyToDockAnchor()
+        } else {
+            flyBackFromDockAndResume()
+        }
+    }
+
+    /// Flies the buddy to the notch dock anchor, then parks it there (stops
+    /// following the mouse). Reuses `animateBezierFlightArc` + rotation.
+    private func flyToDockAnchor() {
+        isParkedAtDock = false
+        buddyNavigationMode = .navigatingToTarget
+        isReturningToCursor = false
+
+        let target = dockAnchorInSwiftUI()
+        animateBezierFlightArc(to: target) {
+            // Land + park: resume "followingCursor" mode but mark parked so the
+            // tracking timer's follow branch is suppressed (buddy stays put).
+            self.buddyNavigationMode = .followingCursor
+            self.isReturningToCursor = false
+            self.isParkedAtDock = true
+            self.triangleRotationDegrees = 35.0
+            self.buddyFlightScale = 1.0
+            self.cursorPosition = target
+        }
+    }
+
+    /// Flies the buddy from the dock anchor back out to the current mouse
+    /// location, then resumes normal cursor following.
+    private func flyBackFromDockAndResume() {
+        // Force the start position to the anchor (the commercial
+        // `...UndockFlightForcedStartScreenPosition` shape) so the return flight
+        // visibly leaves the dock.
+        cursorPosition = dockAnchorInSwiftUI()
+        isParkedAtDock = false
+
+        let mouseLocation = NSEvent.mouseLocation
+        let cursorInSwiftUI = convertScreenPointToSwiftUICoordinates(mouseLocation)
+        let target = CGPoint(x: cursorInSwiftUI.x + 35, y: cursorInSwiftUI.y + 25)
+
+        buddyNavigationMode = .navigatingToTarget
+        isReturningToCursor = false
+
+        animateBezierFlightArc(to: target) {
+            self.finishNavigationAndResumeFollowing()
+        }
     }
 
     /// Whether the buddy triangle should be visible on this screen.
@@ -485,6 +587,13 @@ struct BlueCursorView: View {
             // If another screen's BlueCursorView is navigating to an element,
             // hide the cursor on this screen to prevent a duplicate buddy
             if companionManager.detectedElementScreenLocation != nil {
+                return false
+            }
+            // DOCKED + settled: the buddy has flown into the notch and is now
+            // tucked away ("in its kennel") — hide the desktop cursor entirely.
+            // The fly-IN itself is the .navigatingToTarget case below (visible),
+            // so you still see it travel to the notch before it vanishes.
+            if companionManager.isCursorDocked {
                 return false
             }
             return isCursorOnThisScreen
@@ -518,6 +627,14 @@ struct BlueCursorView: View {
 
             // During forward navigation or pointing, just skip cursor tracking
             if self.buddyNavigationMode != .followingCursor {
+                return
+            }
+
+            // PARKED AT DOCK: docking governs the resting state — while parked the
+            // buddy stays at the anchor and ignores mouse movement. (Element
+            // navigation above still flies/points normally; only the resting
+            // "follow the mouse" behavior is suppressed here.)
+            if self.isParkedAtDock {
                 return
             }
 
