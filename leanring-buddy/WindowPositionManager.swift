@@ -8,6 +8,7 @@
 
 import AppKit
 import ApplicationServices
+import AVFoundation
 import ScreenCaptureKit
 
 enum PermissionRequestPresentationDestination: Equatable {
@@ -132,6 +133,42 @@ class WindowPositionManager {
     /// Opens System Settings to the Screen Recording pane.
     static func openScreenRecordingSettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    // MARK: - Microphone Permission
+
+    private static var hasAttemptedMicrophoneSystemPromptDuringCurrentLaunch = false
+
+    /// Returns true if Microphone permission is granted.
+    static func hasMicrophonePermission() -> Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }
+
+    /// Requests Microphone access. Shows the native macOS prompt the first time
+    /// the status is `.notDetermined`, then falls back to opening System Settings
+    /// (the OS won't re-prompt once the user has answered once).
+    @discardableResult
+    static func requestMicrophonePermission() -> PermissionRequestPresentationDestination {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+
+        if status == .authorized {
+            return .alreadyGranted
+        }
+
+        if status == .notDetermined && !hasAttemptedMicrophoneSystemPromptDuringCurrentLaunch {
+            hasAttemptedMicrophoneSystemPromptDuringCurrentLaunch = true
+            AVCaptureDevice.requestAccess(for: .audio) { _ in }
+            return .systemPrompt
+        }
+
+        openMicrophoneSettings()
+        return .systemSettings
+    }
+
+    /// Opens System Settings to the Microphone pane.
+    static func openMicrophoneSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") else { return }
         NSWorkspace.shared.open(url)
     }
 
