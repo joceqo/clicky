@@ -59,6 +59,13 @@ struct SettingsView: View {
                 }
             }
 
+            Label(
+                "Pointing & clicking need a capable vision model. Claude points and clicks reliably; small or free models often don't emit the [POINT]/[CLICK] tags.",
+                systemImage: "cursorarrow.rays"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
             switch companionManager.brainProviderSettings.providerType {
             case .claudeWorker:
                 TextField("Claude model", text: $companionManager.brainProviderSettings.claudeModel)

@@ -64,6 +64,10 @@ struct CompanionPanelView: View {
 
                 dmFarzaButton
                     .padding(.horizontal, 16)
+
+                debugClickButton
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
             }
 
             Spacer()
@@ -424,6 +428,43 @@ struct CompanionPanelView: View {
     }
 
     // MARK: - DM Farza Button
+
+    /// DEBUG (computer-use, Report B step 1): clicks wherever the buddy is
+    /// currently pointing. Reliable trigger (no global-hotkey conflicts).
+    private var debugClickButton: some View {
+        Button(action: {
+            companionManager.performDebugClickAtPointedLocation()
+        }) {
+            HStack(spacing: 8) {
+                Image(systemName: "cursorarrow.click.2")
+                    .font(.system(size: 12, weight: .medium))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Click pointed element (debug)")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(companionManager.lastPointedScreenLocation == nil
+                         ? "Nothing pointed yet — ask the buddy about a UI element first."
+                         : "Will click the last element the buddy pointed at.")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+            }
+            .foregroundColor(DS.Colors.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
 
     private var dmFarzaButton: some View {
         Button(action: {

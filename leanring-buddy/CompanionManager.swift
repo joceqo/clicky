@@ -40,6 +40,11 @@ final class CompanionManager: ObservableObject {
     /// buddy should fly to and point at. Parsed from Claude's response;
     /// observed by BlueCursorView to trigger the flight animation.
     @Published var detectedElementScreenLocation: CGPoint?
+    /// Persistent mirror of the last pointed location. Unlike
+    /// `detectedElementScreenLocation` (cleared when the triangle stops
+    /// pointing), this survives so the debug click button can act on it
+    /// seconds later, after the user opens the menu-bar panel.
+    @Published var lastPointedScreenLocation: CGPoint?
     /// The display frame (global AppKit coords) of the screen the detected
     /// element is on, so BlueCursorView knows which screen overlay should animate.
     @Published var detectedElementDisplayFrame: CGRect?
@@ -69,6 +74,9 @@ final class CompanionManager: ObservableObject {
 
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
+
+    /// Turns the brain's pointed location into a real interaction (computer use).
+    let actionExecutor: ActionExecutor = CGEventActionExecutor()
     let overlayWindowManager = OverlayWindowManager()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
@@ -132,6 +140,8 @@ final class CompanionManager: ObservableObject {
     /// Global + local Escape-key monitors used to interrupt the current response
     /// and stop TTS playback.
     private var escapeKeyMonitors: [Any] = []
+    /// A brain-decided click scheduled to fire after the triangle lands. Cancelled by Escape.
+    private var pendingActionTask: Task<Void, Never>?
 
     /// True when all three required permissions (accessibility, screen recording,
     /// microphone) are granted. Used by the panel to show a single "all good" state.
@@ -381,11 +391,40 @@ final class CompanionManager: ObservableObject {
     func interruptResponseAndAudio() {
         guard voiceState != .idle || ttsClient.isPlaying else { return }
         currentResponseTask?.cancel()
+        pendingActionTask?.cancel()
         ttsClient.stopPlayback()
         currentResponsePhrases = []
         currentlySpeakingPhraseIndex = nil
         voiceState = .idle
         print("⎋ Escape — interrupted response/audio")
+    }
+
+    /// Clicks the element the buddy is currently pointing at (the same global
+    /// point the triangle flies to). No-op with a log if nothing is pointed yet.
+    /// Triggered from the "Click pointed element (debug)" button in the panel.
+    func performDebugClickAtPointedLocation() {
+        guard let point = detectedElementScreenLocation ?? lastPointedScreenLocation else {
+            print("🖱️ Debug click: nothing pointed yet — ask the buddy about a UI element first.")
+            return
+        }
+        print("🖱️ Debug click → global AppKit (\(Int(point.x)), \(Int(point.y)))")
+        actionExecutor.click(atGlobalPoint: point, clickCount: 1)
+        print("🖱️ Debug click: dispatched via \(type(of: actionExecutor)).")
+    }
+
+    /// Dispatches a brain-decided click after a short delay, letting the triangle
+    /// fly to the target first. Cancelled if the user hits Escape.
+    private func scheduleBrainDrivenClick(at point: CGPoint, clickCount: Int, label: String?) {
+        pendingActionTask?.cancel()
+        pendingActionTask = Task { @MainActor [weak self] in
+            // Wait for the triangle's flight animation to land on the target.
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard let self, !Task.isCancelled else { return }
+            let verb = clickCount >= 2 ? "double-click" : "click"
+            print("🖱️ Brain-driven \(verb) → global AppKit (\(Int(point.x)), \(Int(point.y))) — \"\(label ?? "element")\"")
+            self.actionExecutor.click(atGlobalPoint: point, clickCount: clickCount)
+            print("🖱️ Brain-driven \(verb): dispatched via \(type(of: self.actionExecutor)).")
+        }
     }
 
     func stop() {
@@ -687,6 +726,15 @@ final class CompanionManager: ObservableObject {
     - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
     - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
+
+    taking action (clicking):
+    you can also actually click for the user, not just point. ONLY do this when the user explicitly asks you to perform an action — "open that file", "click the run button", "press save", "launch it". if they're just asking a question or where something is, point with [POINT:...], don't click.
+    - to single-click (buttons, menus, links, tabs): use [CLICK:x,y:label] instead of [POINT:...]. same coordinate space and screen rules as pointing.
+    - to open something that needs a double-click (a file or folder in finder, an app icon, a list item that opens on double-click): use [DBLCLICK:x,y:label].
+    - only ever emit one action tag per response. the triangle will fly to the spot and then click, so still say what you're doing in your spoken text.
+    examples:
+    - user says "open clicky-conversations dot md": "opening it now. [DBLCLICK:1118,455:clicky-conversations.md]"
+    - user says "click the run button": "running it. [CLICK:1240,80:run button]"
     """
 
     // MARK: - AI Response Pipeline
@@ -796,9 +844,19 @@ final class CompanionManager: ObservableObject {
                     )
 
                     detectedElementScreenLocation = globalLocation
+                    lastPointedScreenLocation = globalLocation
                     detectedElementDisplayFrame = displayFrame
                     ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
                     print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
+
+                    // Brain-driven action: if the buddy chose to click/double-click,
+                    // dispatch it after the triangle has flown to the target so the
+                    // user sees where it's about to act. Cancellable via Escape.
+                    if parseResult.action != .point {
+                        let clicks = parseResult.action == .doubleClick ? 2 : 1
+                        scheduleBrainDrivenClick(at: globalLocation, clickCount: clicks,
+                                                 label: parseResult.elementLabel)
+                    }
                 } else {
                     print("🎯 Element pointing: \(parseResult.elementLabel ?? "no element")")
                 }
@@ -909,9 +967,16 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Point Tag Parsing
 
-    /// Result of parsing a [POINT:...] tag from Claude's response.
+    /// What the buddy should do at the parsed coordinate.
+    enum PointingAction {
+        case point        // just fly the triangle there
+        case click        // point, then single-click
+        case doubleClick  // point, then double-click (open files/folders/apps)
+    }
+
+    /// Result of parsing a [POINT:...] / [CLICK:...] / [DBLCLICK:...] tag.
     struct PointingParseResult {
-        /// The response text with the [POINT:...] tag removed — this is what gets spoken.
+        /// The response text with the tag removed — this is what gets spoken.
         let spokenText: String
         /// The parsed pixel coordinate, or nil if Claude said "none" or no tag was found.
         let coordinate: CGPoint?
@@ -919,6 +984,8 @@ final class CompanionManager: ObservableObject {
         let elementLabel: String?
         /// Which screen the coordinate refers to (1-based), or nil to default to cursor screen.
         let screenNumber: Int?
+        /// Whether to just point, or also click / double-click.
+        let action: PointingAction
     }
 
     /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
@@ -929,26 +996,34 @@ final class CompanionManager: ObservableObject {
         var coordinate: CGPoint? = nil
         var elementLabel: String? = nil
         var screenNumber: Int? = nil
-        let coordPattern = #"\[POINT:(\d+)\s*,\s*(\d+)(?::([^\]:]+?))?(?::screen(\d+))?\]"#
+        var action: PointingAction = .point
+        // Verb group 1 = POINT | CLICK | DBLCLICK. Same coordinate shape for all.
+        let coordPattern = #"\[(POINT|CLICK|DBLCLICK):(\d+)\s*,\s*(\d+)(?::([^\]:]+?))?(?::screen(\d+))?\]"#
         if let regex = try? NSRegularExpression(pattern: coordPattern, options: []),
            let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)),
-           let xRange = Range(match.range(at: 1), in: responseText),
-           let yRange = Range(match.range(at: 2), in: responseText),
+           let verbRange = Range(match.range(at: 1), in: responseText),
+           let xRange = Range(match.range(at: 2), in: responseText),
+           let yRange = Range(match.range(at: 3), in: responseText),
            let x = Double(responseText[xRange]),
            let y = Double(responseText[yRange]) {
             coordinate = CGPoint(x: x, y: y)
-            if let labelRange = Range(match.range(at: 3), in: responseText) {
+            switch responseText[verbRange] {
+            case "CLICK": action = .click
+            case "DBLCLICK": action = .doubleClick
+            default: action = .point
+            }
+            if let labelRange = Range(match.range(at: 4), in: responseText) {
                 elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
             }
-            if let screenRange = Range(match.range(at: 4), in: responseText) {
+            if let screenRange = Range(match.range(at: 5), in: responseText) {
                 screenNumber = Int(responseText[screenRange])
             }
         }
 
-        // Strip ANY [POINT:...] tag (incl. [POINT:none] and malformed/unterminated)
-        // so the marker never leaks into the spoken text.
+        // Strip ANY [POINT/CLICK/DBLCLICK:...] tag (incl. [POINT:none] and
+        // malformed/unterminated) so the marker never leaks into spoken text.
         var spokenText = responseText
-        if let stripRegex = try? NSRegularExpression(pattern: #"\s*\[POINT:[^\]]*\]?"#, options: []) {
+        if let stripRegex = try? NSRegularExpression(pattern: #"\s*\[(?:POINT|CLICK|DBLCLICK):[^\]]*\]?"#, options: []) {
             spokenText = stripRegex.stringByReplacingMatches(
                 in: spokenText,
                 range: NSRange(spokenText.startIndex..., in: spokenText),
@@ -961,7 +1036,8 @@ final class CompanionManager: ObservableObject {
             spokenText: spokenText,
             coordinate: coordinate,
             elementLabel: elementLabel ?? (coordinate == nil ? "none" : nil),
-            screenNumber: screenNumber
+            screenNumber: screenNumber,
+            action: action
         )
     }
 
@@ -1160,6 +1236,7 @@ final class CompanionManager: ObservableObject {
                 // comment instead of a random phrase
                 detectedElementBubbleText = parseResult.spokenText
                 detectedElementScreenLocation = globalLocation
+                lastPointedScreenLocation = globalLocation
                 detectedElementDisplayFrame = displayFrame
                 print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
             } catch {
