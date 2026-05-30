@@ -96,6 +96,15 @@ final class NotchWindowManager: NSObject {
                     guard self.isShown, let notch = self.notch else { return }
                     if hovering {
                         await notch.expand(on: self.notchScreen)
+                        // FIRST-CLICK FIX: the DynamicNotch panel is a
+                        // .nonactivatingPanel, so the *first* click inside it is
+                        // normally eaten making the window key instead of hitting
+                        // the SwiftUI button (the classic "double click to switch
+                        // tab" bug). By making the panel key the moment the user
+                        // hovers — before they click — the click lands on the tab
+                        // button directly. `acceptsFirstMouse` on the hosting view
+                        // (see FirstMouseView in NotchRootView) covers the rest.
+                        notch.windowController?.window?.makeKey()
                     } else {
                         await notch.compact(on: self.notchScreen)
                     }
@@ -105,26 +114,13 @@ final class NotchWindowManager: NSObject {
 }
 
 /// The compact (collapsed) notch content: the buddy's little triangle, shown as
-/// a Dynamic-Island pill in the notch.
+/// a Dynamic-Island pill in the notch. Uses the shared `NotchBuddyGlyph` so the
+/// triangle is visually continuous with the expanded panel's header glyph (see
+/// NotchBuddyGlyph.swift / NotchRootView) across the compact → expanded morph.
 private struct NotchCompactBuddy: View {
     var body: some View {
-        NotchTriangle()
-            .fill(DS.Colors.accent)
-            .frame(width: 13, height: 11)
+        NotchBuddyGlyph()
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .accessibilityLabel("Clicky")
-    }
-}
-
-/// A simple upward triangle matching the buddy cursor's silhouette.
-private struct NotchTriangle: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        path.closeSubpath()
-        return path
     }
 }

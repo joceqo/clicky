@@ -58,7 +58,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             menuBarPanelManager?.showPanelOnLaunch()
         }
         registerAsLoginItemIfNeeded()
-        // startSparkleUpdater()
+        // Apply the persisted Dock-visibility preference (default: notch only).
+        DockVisibility.apply(showInDock: DockVisibility.isShownInDock)
+        startSparkleUpdater()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -87,6 +89,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             userDriverDelegate: nil
         )
         self.sparkleUpdaterController = updaterController
+        SparkleUpdater.shared = updaterController
 
         do {
             try updaterController.updater.start()
@@ -94,4 +97,19 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             print("⚠️ Clicky: Sparkle updater failed to start: \(error)")
         }
     }
+}
+
+/// Tiny shared accessor so in-app surfaces (e.g. the Notch Settings tab) can
+/// trigger "Check for Updates…" without holding a reference to the AppDelegate.
+@MainActor
+enum SparkleUpdater {
+    static var shared: SPUStandardUpdaterController?
+
+    /// Presents Sparkle's "Check for Updates" UI if the updater is running.
+    static func checkForUpdates() {
+        shared?.checkForUpdates(nil)
+    }
+
+    /// Whether the updater is available (started successfully).
+    static var isAvailable: Bool { shared != nil }
 }

@@ -45,9 +45,7 @@ struct NotchRootView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            notchSilhouette
-
-            tabBar
+            header
                 .padding(.horizontal, DS.Spacing.sm)
                 .padding(.top, DS.Spacing.sm)
 
@@ -64,32 +62,39 @@ struct NotchRootView: View {
         .clickyPanelBackground(cornerRadius: DS.CornerRadius.extraLarge)
     }
 
-    // MARK: - Notch silhouette / glow
+    // MARK: - Header (continuous buddy glyph + compact tab bar)
 
-    /// A small cosmetic accent evoking the hardware notch the panel hangs from:
-    /// a rounded black bump with a soft accent glow. Pure SwiftUI, no private APIs.
-    private var notchSilhouette: some View {
-        ZStack {
-            Capsule()
-                .fill(DS.Colors.accent.opacity(0.20))
-                .frame(width: 90, height: 8)
-                .blur(radius: 8)
-                .offset(y: 2)
+    /// The expanded header: the same buddy triangle that lives in the compact
+    /// pill (so the morph reads as continuous), the primary tabs as small
+    /// icon+label pills, and a trailing gear that selects Settings — mirroring
+    /// the real Clicky's "Home · Agents · ⚙" top bar.
+    private var header: some View {
+        HStack(spacing: DS.Spacing.sm) {
+            // Continuous buddy glyph — same triangle as the compact pill.
+            NotchBuddyGlyph(width: 12, height: 10)
+                .padding(.trailing, 2)
 
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(Color.black)
-                .frame(width: 64, height: 6)
+            tabBar
+
+            Spacer(minLength: 0)
+
+            // Trailing gear affordance → Settings tab (like 4011's ⚙).
+            gearButton
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, DS.Spacing.sm)
-        .accessibilityHidden(true)
     }
 
     // MARK: - Tab bar
 
+    /// The primary tabs (everything except Settings, which lives in the trailing
+    /// gear). Compact icon+label pills with a rounded highlight on the selected
+    /// one — matching 4011 where Home is highlighted.
+    private var primaryTabs: [NotchTab] {
+        NotchTab.allCases.filter { $0 != .settings }
+    }
+
     private var tabBar: some View {
-        HStack(spacing: 2) {
-            ForEach(NotchTab.allCases) { tab in
+        HStack(spacing: 4) {
+            ForEach(primaryTabs) { tab in
                 tabButton(tab)
             }
         }
@@ -100,22 +105,47 @@ struct NotchRootView: View {
         return Button {
             selectedTab = tab
         } label: {
-            VStack(spacing: 3) {
+            HStack(spacing: 4) {
                 Image(systemName: tab.systemImage)
-                    .font(.system(size: 13, weight: .medium))
-                Text(tab.rawValue)
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: 11, weight: .semibold))
+                // Only the selected tab shows its label (compact pill, like 4011).
+                if isSelected {
+                    Text(tab.rawValue)
+                        .font(.system(size: 11, weight: .semibold))
+                        .fixedSize()
+                }
             }
             .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
+            .padding(.vertical, 5)
+            .padding(.horizontal, isSelected ? 10 : 7)
             .background(
-                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                RoundedRectangle(cornerRadius: DS.CornerRadius.pill, style: .continuous)
                     .fill(isSelected ? DS.Colors.surface3 : Color.clear)
             )
+            // Whole pill is hit-testable (avoids tap-misses on the gaps).
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(tab.rawValue)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    private var gearButton: some View {
+        let isSelected = selectedTab == .settings
+        return Button {
+            selectedTab = .settings
+        } label: {
+            Image(systemName: NotchTab.settings.systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(6)
+                .background(
+                    Circle().fill(isSelected ? DS.Colors.surface3 : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(NotchTab.settings.rawValue)
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 

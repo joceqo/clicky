@@ -186,6 +186,13 @@ struct BlueCursorView: View {
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
 
+    /// User-selected cursor color (LIVE — picked from the Notch Home tab's
+    /// "Cursor color" swatches). Recolors the idle/responding triangle below.
+    @AppStorage(buddyCursorColorKey) private var buddyCursorColorRaw: String = BuddyCursorColor.blue.rawValue
+    private var buddyCursorColor: Color {
+        (BuddyCursorColor(rawValue: buddyCursorColorRaw) ?? .blue).color
+    }
+
     init(screenFrame: CGRect, isFirstAppearance: Bool, companionManager: CompanionManager) {
         self.screenFrame = screenFrame
         self.isFirstAppearance = isFirstAppearance
@@ -410,10 +417,10 @@ struct BlueCursorView: View {
             // During navigation: NO implicit animation — the frame-by-frame bezier
             // timer controls position directly at 60fps for a smooth arc flight.
             Triangle()
-                .fill(DS.Colors.overlayCursorBlue)
+                .fill(buddyCursorColor)
                 .frame(width: 16, height: 16)
                 .rotationEffect(.degrees(triangleRotationDegrees))
-                .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
+                .shadow(color: buddyCursorColor, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
                 .scaleEffect(buddyFlightScale)
                 .opacity(buddyIsVisibleOnThisScreen && (companionManager.voiceState == .idle || companionManager.voiceState == .responding) ? cursorOpacity : 0)
                 .position(cursorPosition)
