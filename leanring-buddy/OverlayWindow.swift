@@ -103,15 +103,17 @@ private struct PhraseHighlightResponseBubbleView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            ForEach(Array(phrases.enumerated()), id: \.offset) { index, phrase in
-                Text(phrase)
-                    .font(.system(size: 12, weight: index == activePhraseIndex ? .semibold : .regular))
-                    .foregroundColor(DS.Colors.textPrimary.opacity(phraseTextOpacity(forIndex: index)))
+            ForEach(visibleWindow, id: \.index) { item in
+                Text(item.text)
+                    .font(.system(size: 12, weight: item.index == activePhraseIndex ? .semibold : .regular))
+                    .foregroundColor(DS.Colors.textPrimary.opacity(phraseTextOpacity(forIndex: item.index)))
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: 280, alignment: .leading)
+                    .transition(.opacity)
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: activePhraseIndex)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(
@@ -123,6 +125,16 @@ private struct PhraseHighlightResponseBubbleView: View {
                 )
                 .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 6)
         )
+    }
+
+    /// A sliding window around the active phrase so long responses don't render as
+    /// one wall of text: 1 phrase behind + current + 2 ahead. Advances with the TTS.
+    private var visibleWindow: [(index: Int, text: String)] {
+        guard !phrases.isEmpty else { return [] }
+        let active = activePhraseIndex ?? 0
+        let lower = max(0, active - 1)
+        let upper = min(phrases.count, active + 3)
+        return (lower..<upper).map { (index: $0, text: phrases[$0]) }
     }
 
     private func phraseTextOpacity(forIndex index: Int) -> Double {
