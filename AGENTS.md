@@ -66,9 +66,12 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
-| `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
-| `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
-| `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
+| `BrainClient.swift` | ~45 | Protocol for pluggable AI reasoning backends. `ClaudeAPI` and `OpenAICompatibleBrainAdapter` conform to it. |
+| `ClaudeAPI.swift` | ~292 | Claude vision API client conforming to `BrainClient`. Streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
+| `OpenAICompatibleBrainAdapter.swift` | ~170 | `BrainClient` adapter for any OpenAI-format endpoint: OpenAI GPT-4o, local Ollama, LM Studio, etc. Images encoded as base64 data-URL `image_url` blocks. |
+| `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client (legacy, predates `BrainClient` protocol). |
+| `TTSClient.swift` | ~55 | Protocol for pluggable TTS backends + `TTSSentenceSplitter` (NLTokenizer sentence splitting for phrase-by-phrase playback). |
+| `ElevenLabsTTSClient.swift` | ~120 | ElevenLabs TTS client conforming to `TTSClient`. `speakText` awaits full playback completion, enabling CompanionManager's phrase-by-phrase loop. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |

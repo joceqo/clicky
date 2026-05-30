@@ -85,6 +85,54 @@ struct NavigationBubbleSizePreferenceKey: PreferenceKey {
     }
 }
 
+struct ResponseBubbleSizePreferenceKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        value = nextValue()
+    }
+}
+
+// MARK: - Phrase Highlight Response Bubble
+
+/// Shows the full response text split into phrases. The currently-playing
+/// phrase is rendered at full brightness; already-spoken phrases are slightly
+/// dimmed and upcoming phrases are more dimmed, giving a live progress feel.
+private struct PhraseHighlightResponseBubbleView: View {
+    let phrases: [String]
+    let activePhraseIndex: Int?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(Array(phrases.enumerated()), id: \.offset) { index, phrase in
+                Text(phrase)
+                    .font(.system(size: 12, weight: index == activePhraseIndex ? .semibold : .regular))
+                    .foregroundColor(DS.Colors.textPrimary.opacity(phraseTextOpacity(forIndex: index)))
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 280, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(DS.Colors.surface1.opacity(0.95))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle.opacity(0.4), lineWidth: 0.8)
+                )
+                .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 6)
+        )
+    }
+
+    private func phraseTextOpacity(forIndex index: Int) -> Double {
+        guard let activeIndex = activePhraseIndex else { return 1.0 }
+        if index == activeIndex { return 1.0 }
+        if index < activeIndex { return 0.45 }  // already spoken
+        return 0.30                              // not yet spoken
+    }
+}
+
 /// The buddy's behavioral mode. Controls whether it follows the cursor,
 /// is flying toward a detected UI element, or is pointing at an element.
 enum BuddyNavigationMode {
@@ -135,9 +183,10 @@ struct BlueCursorView: View {
     /// The buddy's current behavioral mode (following cursor, navigating, or pointing).
     @State private var buddyNavigationMode: BuddyNavigationMode = .followingCursor
 
-    /// The rotation angle of the triangle in degrees. Default is -35° (cursor-like).
+    /// The rotation angle of the triangle in degrees. Default is +35° — mirrored
+    /// from Clicky's -35° so joceclicky's cursor has its own distinct identity.
     /// Changes to face the direction of travel when navigating to a target.
-    @State private var triangleRotationDegrees: Double = -35.0
+    @State private var triangleRotationDegrees: Double = 35.0
 
     /// Speech bubble text shown when pointing at a detected element.
     @State private var navigationBubbleText: String = ""
@@ -160,6 +209,10 @@ struct BlueCursorView: View {
     /// Scale factor for the navigation speech bubble's pop-in entrance.
     /// Starts at 0.5 and springs to 1.0 when the first character appears.
     @State private var navigationBubbleScale: CGFloat = 1.0
+
+    /// Measured size of the response phrase bubble so we can position its top edge
+    /// just below the cursor rather than centering it at the cursor.
+    @State private var responseBubbleSize: CGSize = .zero
 
     /// True when the buddy is flying BACK to the cursor after pointing.
     /// Only during the return flight can cursor movement cancel the animation.
@@ -292,6 +345,33 @@ struct BlueCursorView: View {
                     .onPreferenceChange(NavigationBubbleSizePreferenceKey.self) { newSize in
                         navigationBubbleSize = newSize
                     }
+            }
+
+            // Response phrase highlight bubble — shown during TTS playback (.responding state).
+            // Renders all response sentences with the currently-speaking one highlighted.
+            // Positioned to the right of and just below the cursor, same as other bubbles.
+            if isCursorOnThisScreen
+               && companionManager.voiceState == .responding
+               && !companionManager.currentResponsePhrases.isEmpty {
+                PhraseHighlightResponseBubbleView(
+                    phrases: companionManager.currentResponsePhrases,
+                    activePhraseIndex: companionManager.currentlySpeakingPhraseIndex
+                )
+                .fixedSize()
+                .overlay(
+                    GeometryReader { geo in
+                        Color.clear
+                            .preference(key: ResponseBubbleSizePreferenceKey.self, value: geo.size)
+                    }
+                )
+                .position(
+                    x: cursorPosition.x + 10 + (responseBubbleSize.width / 2),
+                    y: cursorPosition.y + 18 + (responseBubbleSize.height / 2)
+                )
+                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                .onPreferenceChange(ResponseBubbleSizePreferenceKey.self) { newSize in
+                    responseBubbleSize = newSize
+                }
             }
 
             // Blue triangle cursor — shown when idle or while TTS is playing (responding).
@@ -573,7 +653,7 @@ struct BlueCursorView: View {
         buddyNavigationMode = .pointingAtTarget
 
         // Rotate back to default pointer angle now that we've arrived
-        triangleRotationDegrees = -35.0
+        triangleRotationDegrees = 35.0
 
         // Reset navigation bubble state — start small for the scale-bounce entrance
         navigationBubbleText = ""
@@ -664,7 +744,7 @@ struct BlueCursorView: View {
         navigationAnimationTimer = nil
         buddyNavigationMode = .followingCursor
         isReturningToCursor = false
-        triangleRotationDegrees = -35.0
+        triangleRotationDegrees = 35.0
         buddyFlightScale = 1.0
         navigationBubbleText = ""
         navigationBubbleOpacity = 0.0
