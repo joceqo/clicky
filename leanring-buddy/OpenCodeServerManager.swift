@@ -70,6 +70,24 @@ final class OpenCodeServerManager {
         }
     }
 
+    // MARK: - Status (read-only, for the Notch Agents tab)
+
+    /// True when the server process exists and is currently running.
+    var isRunning: Bool {
+        serverProcess?.isRunning ?? false
+    }
+
+    /// The base URL of the running server, or nil if it isn't running yet.
+    var baseURL: URL? {
+        guard isRunning else { return nil }
+        return runningBaseURL
+    }
+
+    /// True while a startup is in progress (process spawned, awaiting readiness).
+    var isStarting: Bool {
+        startupTask != nil
+    }
+
     // MARK: - Public
 
     /// Returns the base URL of a ready `opencode serve` instance, spawning one on the

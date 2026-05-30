@@ -128,6 +128,53 @@ final class CompanionManager: ObservableObject {
     /// Each entry is the user's transcript and Claude's response.
     private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
 
+    // MARK: - Agents Tab Read Accessors
+
+    /// A short, immutable view of one past exchange for the Notch Agents tab.
+    struct RecentExchange: Identifiable {
+        let id = UUID()
+        let userTranscript: String
+        let assistantResponse: String
+    }
+
+    /// The last few exchanges (oldest→newest within the slice) for the Agents
+    /// "Recent activity" feed. Read-only snapshot; the feed is shown on demand.
+    func recentExchanges(limit: Int = 4) -> [RecentExchange] {
+        conversationHistory.suffix(limit).map {
+            RecentExchange(userTranscript: $0.userTranscript, assistantResponse: $0.assistantResponse)
+        }
+    }
+
+    /// Human-readable name of the active brain provider (e.g. "Claude (Worker proxy)").
+    var currentBrainProviderName: String {
+        providerStore.brain.providerType.displayName
+    }
+
+    /// The model string for the active brain, resolved per provider type. Returns
+    /// nil when the active backend has no meaningful model selector to show.
+    var currentBrainModel: String? {
+        let brain = providerStore.brain
+        switch brain.providerType {
+        case .claudeWorker:
+            return brain.claudeModel.isEmpty ? nil : brain.claudeModel
+        case .openAICompat:
+            return brain.model.isEmpty ? nil : brain.model
+        case .cliAgent:
+            return brain.cliCommand.isEmpty ? nil : brain.cliCommand
+        case .openCodeServer:
+            return brain.openCodeModel.isEmpty ? "Server default" : brain.openCodeModel
+        case .appleOCR:
+            return nil
+        }
+    }
+
+    /// Whether the active brain backend can see screenshots (vision-capable).
+    /// claudeWorker, openAICompat (VL models) and the agent backends receive
+    /// screenshots; Apple OCR is text-only.
+    var currentBrainHasVision: Bool {
+        providerStore.brain.providerType != .appleOCR
+    }
+
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
     private var currentResponseTask: Task<Void, Never>?
