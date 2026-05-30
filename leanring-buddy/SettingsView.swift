@@ -16,6 +16,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             brainSection
+            transcriptionSection
             voiceSection
         }
         .formStyle(.grouped)
@@ -83,6 +84,58 @@ struct SettingsView: View {
 
             case .appleOCR:
                 Text("On-device OCR (Vision) extracts the screen's text, then Apple Intelligence reasons over it. Fully local, free, light on the Mac — but text-only (can't see images/layout). Requires macOS 26 + Apple Intelligence enabled.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Speech-to-Text
+
+    private var transcriptionSection: some View {
+        Section("Speech-to-Text (STT)") {
+            Picker("Provider", selection: $companionManager.sttProviderSettings.providerType) {
+                ForEach(STTProviderType.allCases) { type in
+                    Text(type.displayName).tag(type)
+                }
+            }
+
+            switch companionManager.sttProviderSettings.providerType {
+            case .openAICompat:
+                HStack {
+                    Button("Voxtral") {
+                        companionManager.sttProviderSettings = .voxtral(
+                            apiKey: companionManager.sttProviderSettings.openAICompatAPIKey
+                        )
+                    }
+                    Button("OpenAI") {
+                        companionManager.sttProviderSettings = .openAIWhisper(
+                            apiKey: companionManager.sttProviderSettings.openAICompatAPIKey
+                        )
+                    }
+                    Button("Voicebox") {
+                        companionManager.sttProviderSettings = .voicebox
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                TextField("Base URL", text: $companionManager.sttProviderSettings.openAICompatBaseURL)
+                    .textContentType(.URL)
+                TextField("Model", text: $companionManager.sttProviderSettings.openAICompatModel)
+                SecureField("API key (leave empty for local)", text: $companionManager.sttProviderSettings.openAICompatAPIKey)
+
+                Text("Any /v1/audio/transcriptions endpoint (Voxtral, OpenAI Whisper, Voicebox, LM Studio). STT needs only a URL, key, and model — there is no voice to set. Voicebox default: http://127.0.0.1:8880")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+            case .assemblyAI:
+                Text("Real-time streaming transcription via the Cloudflare Worker proxy configured in code.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+            case .appleSpeech:
+                Text("Apple Speech framework — on-device, offline, no configuration. Requires speech recognition permission.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

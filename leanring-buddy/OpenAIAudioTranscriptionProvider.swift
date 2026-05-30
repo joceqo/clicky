@@ -16,21 +16,59 @@ struct OpenAIAudioTranscriptionProviderError: LocalizedError {
     }
 }
 
+/// File-upload transcription provider for any OpenAI-compatible
+/// `/v1/audio/transcriptions` endpoint (OpenAI Whisper, Mistral Voxtral,
+/// local Voicebox/Whisper, LM Studio, …).
+///
+/// Defaults reproduce the original OpenAI-only behavior: when constructed
+/// with no arguments it reads the key/model from `AppBundleConfiguration`
+/// and targets `https://api.openai.com`. Pass `baseURL`/`model`/`apiKey`
+/// explicitly to point it at any other compatible server.
 final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
-    private let apiKey = AppBundleConfiguration.stringValue(forKey: "OpenAIAPIKey")
-    private let modelName = AppBundleConfiguration.stringValue(forKey: "OpenAITranscriptionModel")
-        ?? "gpt-4o-transcribe"
+    private let baseURL: String
+    private let apiKey: String?
+    private let modelName: String
+    let displayName: String
 
-    let displayName = "OpenAI"
     let requiresSpeechRecognitionPermission = false
 
+    init(
+        baseURL: String = "https://api.openai.com",
+        apiKey: String? = AppBundleConfiguration.stringValue(forKey: "OpenAIAPIKey"),
+        model: String = AppBundleConfiguration.stringValue(forKey: "OpenAITranscriptionModel")
+            ?? "gpt-4o-transcribe",
+        displayName: String = "OpenAI"
+    ) {
+        self.baseURL = baseURL
+        self.apiKey = apiKey
+        self.modelName = model
+        self.displayName = displayName
+    }
+
+    /// Local servers (Voicebox, LM Studio, …) often need no key, so they are
+    /// configured as long as a base URL is present. The hosted OpenAI default
+    /// still requires a key.
+    private var requiresAPIKey: Bool {
+        let normalized = baseURL.lowercased()
+        return normalized.contains("api.openai.com") || normalized.contains("api.mistral.ai")
+    }
+
     var isConfigured: Bool {
-        apiKey != nil
+        guard !baseURL.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        return requiresAPIKey ? apiKey != nil : true
     }
 
     var unavailableExplanation: String? {
         guard !isConfigured else { return nil }
-        return "OpenAI transcription is not configured. Add OpenAIAPIKey to Info.plist."
+        return "\(displayName) transcription is not configured. Add an API key in Settings."
+    }
+
+    private var transcriptionURL: URL? {
+        let trimmedBaseURL = baseURL.trimmingCharacters(in: .whitespaces)
+        let normalizedBaseURL = trimmedBaseURL.hasSuffix("/")
+            ? String(trimmedBaseURL.dropLast())
+            : trimmedBaseURL
+        return URL(string: "\(normalizedBaseURL)/v1/audio/transcriptions")
     }
 
     func startStreamingSession(
@@ -39,15 +77,23 @@ final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
         onFinalTranscriptReady: @escaping (String) -> Void,
         onError: @escaping (Error) -> Void
     ) async throws -> any BuddyStreamingTranscriptionSession {
-        guard let apiKey else {
+        guard isConfigured else {
             throw OpenAIAudioTranscriptionProviderError(
-                message: unavailableExplanation ?? "OpenAI transcription is not configured."
+                message: unavailableExplanation ?? "\(displayName) transcription is not configured."
+            )
+        }
+
+        guard let transcriptionURL else {
+            throw OpenAIAudioTranscriptionProviderError(
+                message: "\(displayName) transcription has an invalid base URL."
             )
         }
 
         return OpenAIAudioTranscriptionSession(
+            transcriptionURL: transcriptionURL,
             apiKey: apiKey,
             modelName: modelName,
+            providerDisplayName: displayName,
             keyterms: keyterms,
             onTranscriptUpdate: onTranscriptUpdate,
             onFinalTranscriptReady: onFinalTranscriptReady,
@@ -63,11 +109,12 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
         let text: String
     }
 
-    private static let transcriptionURL = URL(string: "https://api.openai.com/v1/audio/transcriptions")!
     private static let targetSampleRate = 16_000
 
-    private let apiKey: String
+    private let transcriptionURL: URL
+    private let apiKey: String?
     private let modelName: String
+    private let providerDisplayName: String
     private let keyterms: [String]
     private let onTranscriptUpdate: (String) -> Void
     private let onFinalTranscriptReady: (String) -> Void
@@ -86,15 +133,19 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
     private var transcriptionUploadTask: Task<Void, Never>?
 
     init(
-        apiKey: String,
+        transcriptionURL: URL,
+        apiKey: String?,
         modelName: String,
+        providerDisplayName: String,
         keyterms: [String],
         onTranscriptUpdate: @escaping (String) -> Void,
         onFinalTranscriptReady: @escaping (String) -> Void,
         onError: @escaping (Error) -> Void
     ) {
+        self.transcriptionURL = transcriptionURL
         self.apiKey = apiKey
         self.modelName = modelName
+        self.providerDisplayName = providerDisplayName
         self.keyterms = keyterms
         self.onTranscriptUpdate = onTranscriptUpdate
         self.onFinalTranscriptReady = onFinalTranscriptReady
@@ -169,16 +220,18 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
             deliverFinalTranscript(transcriptText)
         } catch {
             guard !stateQueue.sync(execute: { isCancelled }) else { return }
-            print("[OpenAI Transcription] ❌ Upload failed (audio size: \(wavAudioData.count) bytes): \(error.localizedDescription)")
+            print("[\(providerDisplayName) Transcription] ❌ Upload failed (audio size: \(wavAudioData.count) bytes): \(error.localizedDescription)")
             onError(error)
         }
     }
 
     private func requestTranscription(for wavAudioData: Data) async throws -> String {
         let multipartBoundary = "Boundary-\(UUID().uuidString)"
-        var request = URLRequest(url: Self.transcriptionURL)
+        var request = URLRequest(url: transcriptionURL)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if let apiKey, !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("multipart/form-data; boundary=\(multipartBoundary)", forHTTPHeaderField: "Content-Type")
 
         let requestBodyData = makeMultipartRequestBody(
@@ -191,14 +244,14 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw OpenAIAudioTranscriptionProviderError(
-                message: "OpenAI transcription returned an invalid response."
+                message: "\(providerDisplayName) transcription returned an invalid response."
             )
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
             let responseText = String(data: responseData, encoding: .utf8) ?? "Unknown error"
             throw OpenAIAudioTranscriptionProviderError(
-                message: "OpenAI transcription failed: \(responseText)"
+                message: "\(providerDisplayName) transcription failed: \(responseText)"
             )
         }
 
@@ -217,7 +270,7 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
         }
 
         throw OpenAIAudioTranscriptionProviderError(
-            message: "OpenAI transcription returned an empty transcript."
+            message: "\(providerDisplayName) transcription returned an empty transcript."
         )
     }
 
