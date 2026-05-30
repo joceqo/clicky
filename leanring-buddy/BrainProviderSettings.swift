@@ -24,6 +24,9 @@ enum BrainProviderType: String, Codable, CaseIterable, Identifiable {
     case openAICompat = "openai_compat"
     /// A local agent CLI driven as a subprocess (Claude Code, OpenCode, Codex, Cursor).
     case cliAgent = "cli_agent"
+    /// A persistent `opencode serve` HTTP server reusing one session across turns —
+    /// no per-turn cold start, multi-turn context kept server-side.
+    case openCodeServer = "opencode_server"
     /// On-device OCR (Vision) + Apple Intelligence LLM. Low-compute, text-only
     /// (reads screen text, can't see images). Requires macOS 26 + Apple Intelligence.
     case appleOCR = "apple_ocr"
@@ -32,10 +35,11 @@ enum BrainProviderType: String, Codable, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .claudeWorker: return "Claude (Worker proxy)"
-        case .openAICompat: return "OpenAI-compatible (LM Studio / API key)"
-        case .cliAgent:     return "Agent CLI (Claude Code / OpenCode / Codex / Cursor)"
-        case .appleOCR:     return "Apple OCR + on-device LLM (light, text-only)"
+        case .claudeWorker:   return "Claude (Worker proxy)"
+        case .openAICompat:   return "OpenAI-compatible (LM Studio / API key)"
+        case .cliAgent:       return "Agent CLI (Claude Code / OpenCode / Codex / Cursor)"
+        case .openCodeServer: return "OpenCode (persistent server)"
+        case .appleOCR:       return "Apple OCR + on-device LLM (light, text-only)"
         }
     }
 }
@@ -58,6 +62,12 @@ struct BrainProviderSettings: Codable {
     // is replaced (as a single argument) by the composed prompt.
     var cliCommand: String      = "claude"
     var cliArgsTemplate: String = "-p {prompt} --output-format text --dangerously-skip-permissions"
+
+    // OpenCode persistent-server settings.
+    // `openCodeModel` is a `providerID/modelID` selector (e.g. "anthropic/claude-sonnet-4-5");
+    // empty means "use the server's configured default model".
+    var openCodeModel: String      = ""
+    var openCodeBinaryPath: String = "opencode"
 }
 
 // MARK: - Named presets
@@ -124,6 +134,14 @@ extension BrainProviderSettings {
         s.cliArgsTemplate = "{prompt}"
         return s
     }
+
+    /// Persistent `opencode serve` server, reusing one session across turns.
+    static var openCodeServer: BrainProviderSettings {
+        var s = BrainProviderSettings(); s.providerType = .openCodeServer
+        s.openCodeBinaryPath = "opencode"
+        s.openCodeModel = ""
+        return s
+    }
 }
 
 // MARK: - Factory
@@ -155,6 +173,12 @@ enum BrainProviderFactory {
                 .split(whereSeparator: { $0 == " " || $0 == "\n" })
                 .map(String.init)
             return CLIAgentBrainAdapter(command: settings.cliCommand, argsTemplate: args)
+
+        case .openCodeServer:
+            return OpenCodeServerBrainClient(
+                model: settings.openCodeModel,
+                binaryPath: settings.openCodeBinaryPath
+            )
 
         case .appleOCR:
             return AppleOCRBrainAdapter()
