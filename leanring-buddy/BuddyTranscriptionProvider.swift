@@ -31,10 +31,13 @@ protocol BuddyTranscriptionProvider {
 
 enum BuddyTranscriptionProviderFactory {
 
-    /// Resolves the active transcription provider from the user-selectable
-    /// `STTProviderSettings` (persisted to UserDefaults via the Settings window).
+    /// Resolves the active transcription provider from the shared `ProviderStore`'s
+    /// STT slot (one key reused across slots; migrated once from the legacy keys).
     static func makeDefaultProvider() -> any BuddyTranscriptionProvider {
-        let settings = STTProviderFactory.loadSettings()
+        let store = ProviderStoreFactory.load()
+        let settings = store.stt.legacySettings(
+            provider: store.provider(for: store.stt.providerID)
+        )
         let provider = STTProviderFactory.makeProvider(settings: settings)
         print("🎙️ Transcription: using \(provider.displayName)")
         return provider

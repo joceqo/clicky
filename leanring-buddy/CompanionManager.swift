@@ -94,32 +94,27 @@ final class CompanionManager: ObservableObject {
     /// through this so keys never ship in the app binary.
     private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
 
-    /// Active brain (LLM) backend. Resolved from BrainProviderSettings and replaced
-    /// immediately when the user changes the provider in Settings.
+    /// The single shared provider/credentials store: one API key per provider,
+    /// reused across the Brain / STT / TTS slots. Migrated once from the three
+    /// legacy UserDefaults keys (see `ProviderStoreFactory.migrateLegacy`).
+    /// Mutating it rebuilds the affected live clients and re-persists — same
+    /// didSet→apply→save semantics the three separate properties had before.
+    @Published var providerStore: ProviderStore = ProviderStoreFactory.load() {
+        didSet { applyProviderStore(previous: oldValue) }
+    }
+
+    /// Active brain (LLM) backend. Resolved from the brain slot + its provider and
+    /// replaced immediately when the user changes the provider in Settings.
     private lazy var brainClient: any BrainClient = BrainProviderFactory.makeClient(
-        settings: brainProviderSettings,
+        settings: providerStore.brain.legacySettings(
+            provider: providerStore.provider(for: providerStore.brain.providerID)
+        ),
         claudeProxyURL: "\(Self.workerBaseURL)/chat"
     )
 
-    /// The current brain provider settings, persisted to UserDefaults.
-    @Published var brainProviderSettings: BrainProviderSettings = BrainProviderFactory.loadSettings() {
-        didSet { applyBrainProviderSettings() }
-    }
-
-    /// Active TTS backend. Resolved from TTSProviderSettings at startup and replaced
+    /// Active TTS backend. Resolved from the TTS slot at startup and replaced
     /// immediately when the user changes the TTS provider in Settings.
     private var ttsClient: any TTSClient = SystemTTSClient()
-
-    /// The current TTS provider settings, persisted to UserDefaults.
-    @Published var ttsProviderSettings: TTSProviderSettings = TTSProviderFactory.loadSettings() {
-        didSet { applyTTSProviderSettings() }
-    }
-
-    /// The current STT (speech-to-text) provider settings, persisted to UserDefaults.
-    /// Changing this live-swaps the dictation manager's transcription backend.
-    @Published var sttProviderSettings: STTProviderSettings = STTProviderFactory.loadSettings() {
-        didSet { applySTTProviderSettings() }
-    }
 
     /// Index of the phrase currently being spoken by TTS (into `currentResponsePhrases`).
     /// Observed by BlueCursorView to highlight the active sentence in the response bubble.
@@ -171,38 +166,81 @@ final class CompanionManager: ObservableObject {
         brainClient.model = model
     }
 
-    /// Applies the current `ttsProviderSettings` by rebuilding the TTS client.
+    /// Persists the shared store and rebuilds only the slots whose effective
+    /// configuration changed. Preserves the per-slot didSet→apply behaviour the
+    /// three separate published properties used to have.
+    /// - Parameter previous: the store value before the mutation (nil = rebuild all,
+    ///   used at init time).
+    private func applyProviderStore(previous: ProviderStore? = nil) {
+        ProviderStoreFactory.save(providerStore)
+
+        // Resolve each slot's effective legacy settings (slot + its provider).
+        let brain = providerStore.brain.legacySettings(
+            provider: providerStore.provider(for: providerStore.brain.providerID)
+        )
+        let stt = providerStore.stt.legacySettings(
+            provider: providerStore.provider(for: providerStore.stt.providerID)
+        )
+        let tts = providerStore.tts.legacySettings(
+            provider: providerStore.provider(for: providerStore.tts.providerID)
+        )
+
+        let prevBrain = previous?.brain.legacySettings(
+            provider: previous?.provider(for: previous?.brain.providerID ?? nil)
+        )
+        let prevSTT = previous?.stt.legacySettings(
+            provider: previous?.provider(for: previous?.stt.providerID ?? nil)
+        )
+        let prevTTS = previous?.tts.legacySettings(
+            provider: previous?.provider(for: previous?.tts.providerID ?? nil)
+        )
+
+        if previous == nil || !settingsEqual(brain, prevBrain) {
+            applyBrainSettings(brain)
+        }
+        if previous == nil || !settingsEqual(stt, prevSTT) {
+            applySTTSettings(stt)
+        }
+        if previous == nil || !settingsEqual(tts, prevTTS) {
+            applyTTSSettings(tts)
+        }
+    }
+
+    /// Rebuilds the TTS client from resolved legacy settings.
     /// Stops any in-progress playback first so the swap is clean.
-    private func applyTTSProviderSettings() {
+    private func applyTTSSettings(_ settings: TTSProviderSettings) {
         ttsClient.stopPlayback()
         currentResponsePhrases = []
         currentlySpeakingPhraseIndex = nil
         ttsClient = TTSProviderFactory.makeClient(
-            settings: ttsProviderSettings,
+            settings: settings,
             elevenLabsProxyURL: "\(Self.workerBaseURL)/tts"
         )
-        TTSProviderFactory.saveSettings(ttsProviderSettings)
-        print("🔊 TTS provider: \(ttsProviderSettings.providerType.displayName)")
+        print("🔊 TTS provider: \(settings.providerType.displayName)")
     }
 
-    /// Applies the current `sttProviderSettings` by live-swapping the dictation
-    /// manager's transcription provider. Cancels any in-flight session first.
-    private func applySTTProviderSettings() {
-        buddyDictationManager.rebuildTranscriptionProvider(from: sttProviderSettings)
-        STTProviderFactory.saveSettings(sttProviderSettings)
-        print("🎙️ STT provider: \(sttProviderSettings.providerType.displayName)")
+    /// Live-swaps the dictation manager's transcription provider.
+    private func applySTTSettings(_ settings: STTProviderSettings) {
+        buddyDictationManager.rebuildTranscriptionProvider(from: settings)
+        print("🎙️ STT provider: \(settings.providerType.displayName)")
     }
 
-    /// Applies the current `brainProviderSettings` by rebuilding the brain client.
-    /// Cancels any in-flight response first so the swap is clean.
-    private func applyBrainProviderSettings() {
+    /// Rebuilds the brain client. Cancels any in-flight response first.
+    private func applyBrainSettings(_ settings: BrainProviderSettings) {
         currentResponseTask?.cancel()
         brainClient = BrainProviderFactory.makeClient(
-            settings: brainProviderSettings,
+            settings: settings,
             claudeProxyURL: "\(Self.workerBaseURL)/chat"
         )
-        BrainProviderFactory.saveSettings(brainProviderSettings)
-        print("🧠 Brain provider: \(brainProviderSettings.providerType.displayName)")
+        print("🧠 Brain provider: \(settings.providerType.displayName)")
+    }
+
+    /// Cheap structural equality for the legacy settings structs (all Codable,
+    /// so compare their encoded form). Used to skip needless client rebuilds.
+    private func settingsEqual<T: Encodable>(_ a: T, _ b: T?) -> Bool {
+        guard let b else { return false }
+        let enc = JSONEncoder()
+        return (try? enc.encode(a)) == (try? enc.encode(b))
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -273,7 +311,11 @@ final class CompanionManager: ObservableObject {
         // well before the onboarding demo fires at ~40s into the video.
         _ = brainClient
         // Apply persisted TTS settings now that the worker URL is known.
-        applyTTSProviderSettings()
+        applyTTSSettings(
+            providerStore.tts.legacySettings(
+                provider: providerStore.provider(for: providerStore.tts.providerID)
+            )
+        )
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
