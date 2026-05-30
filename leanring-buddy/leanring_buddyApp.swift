@@ -91,6 +91,12 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         self.sparkleUpdaterController = updaterController
         SparkleUpdater.shared = updaterController
 
+        // The bundled appcast (SUFeedURL) points at the UPSTREAM app's feed, not
+        // this fork's. Disable automatic/background checks so joceclicky never
+        // silently offers to "update" itself into the upstream app. The manual
+        // "Check for Updates" button stays available for when a fork-owned
+        // appcast is configured.
+        updaterController.updater.automaticallyChecksForUpdates = false
         do {
             try updaterController.updater.start()
         } catch {
