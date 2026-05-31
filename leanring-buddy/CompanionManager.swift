@@ -1105,6 +1105,103 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    // MARK: - Voice Turn Persistence
+
+    /// Persists a completed push-to-talk exchange into the active conversation so
+    /// it survives relaunch and shows up in the Threads tab and chat window —
+    /// exactly like a typed exchange, but tagged `.voice` and carrying the
+    /// screenshot Clicky saw.
+    ///
+    /// Mirrors how `sendChatTextMessage` writes through `conversationStore`: it
+    /// appends a user message (transcript + the captured cursor screenshot) and an
+    /// assistant message (the tag-stripped spoken response) to `chatMessages`,
+    /// auto-titles the conversation from the first turn, then saves the messages
+    /// and index. Voice and text share the same active conversation, so turns
+    /// interleave naturally.
+    ///
+    /// Screenshot saving and the JSON writes happen off the main actor so they
+    /// never block TTS. Only the `@Published` mutations run on the main actor.
+    ///
+    /// - Parameters:
+    ///   - transcript: what the user said (the user message content).
+    ///   - spokenText: Clicky's final response with the point/click tag stripped.
+    ///   - primaryCapture: the cursor screen's capture (raw JPEG) to store with
+    ///     the user message, or nil if capture failed.
+    ///   - appName / appBundleID: frontmost app metadata for the screenshot caption.
+    private func persistVoiceTurn(
+        transcript: String,
+        spokenText: String,
+        primaryCapture: CompanionScreenCapture?,
+        appName: String?,
+        appBundleID: String?
+    ) {
+        // Build the message pair up front so the user-message ID can name the
+        // screenshot file (matching the text-chat / screenshot-store convention).
+        let userMessageID = UUID()
+        let userMessage = ChatMessage(
+            id: userMessageID,
+            role: .user,
+            content: transcript,
+            source: .voice,
+            screenshotFileNames: [],
+            foregroundAppBundleID: appBundleID,
+            foregroundAppName: appName
+        )
+        let assistantMessage = ChatMessage(
+            role: .assistant,
+            content: spokenText,
+            source: .voice,
+            modelID: brainClient.model
+        )
+
+        // Target the active conversation (shared with the chat window). It always
+        // exists because loadChatConversationsIfNeeded() runs at init.
+        guard let activeID = activeConversationID else { return }
+
+        autoTitleActiveConversationIfNeeded(from: transcript)
+
+        // `chatMessages` always belongs to `activeConversationID`, so append the
+        // pair to the live list — the chat window updates immediately.
+        chatMessages.append(userMessage)
+        chatMessages.append(assistantMessage)
+
+        // Save the screenshot + JSON off the hot path so TTS isn't blocked.
+        let store = conversationStore
+        let rawScreenshot = primaryCapture?.imageData
+        Task.detached(priority: .utility) { [weak self] in
+            var savedFileNames: [String] = []
+            if let rawScreenshot {
+                savedFileNames = store.saveCompressedScreenshots(
+                    [rawScreenshot],
+                    forMessageWithID: userMessageID
+                )
+            }
+
+            await MainActor.run {
+                guard let self else { return }
+
+                if self.activeConversationID == activeID {
+                    // Still viewing this conversation: patch the saved file names
+                    // onto the live message so the thumbnail renders, then persist.
+                    if let idx = self.chatMessages.firstIndex(where: { $0.id == userMessageID }) {
+                        self.chatMessages[idx].screenshotFileNames = savedFileNames
+                    }
+                    self.conversationStore.saveMessages(self.chatMessages, for: activeID)
+                    self.updateConversationMetadata(for: activeID)
+                } else {
+                    // The user switched conversations before compression finished.
+                    // switchToConversation() already saved the appended pair to this
+                    // conversation's file, so just patch the screenshot names on disk.
+                    var messages = self.conversationStore.loadMessages(for: activeID)
+                    if let idx = messages.firstIndex(where: { $0.id == userMessageID }) {
+                        messages[idx].screenshotFileNames = savedFileNames
+                        self.conversationStore.saveMessages(messages, for: activeID)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Companion Prompt
 
     private static let companionVoiceResponseSystemPrompt = """
@@ -1167,6 +1264,12 @@ final class CompanionManager: ObservableObject {
             voiceState = .processing
 
             do {
+                // Capture the frontmost app before grabbing screens so we can
+                // caption the saved screenshot in the chat with the app it shows.
+                let frontmostApp = NSWorkspace.shared.frontmostApplication
+                let frontmostAppName = frontmostApp?.localizedName
+                let frontmostAppBundleID = frontmostApp?.bundleIdentifier
+
                 // Capture all connected screens so the AI has full context
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
 
@@ -1288,6 +1391,20 @@ final class CompanionManager: ObservableObject {
                 }
 
                 print("🧠 Conversation history: \(conversationHistory.count) exchanges")
+
+                // Persist this voice turn (transcript + cursor-screen screenshot +
+                // spoken response) into the active conversation so it shows up in
+                // Threads and the chat window and survives relaunch. Runs its file
+                // IO off the main actor, so it won't delay the TTS playback below.
+                let primaryCapture = screenCaptures.first(where: { $0.isCursorScreen })
+                    ?? screenCaptures.first
+                persistVoiceTurn(
+                    transcript: transcript,
+                    spokenText: spokenText,
+                    primaryCapture: primaryCapture,
+                    appName: frontmostAppName,
+                    appBundleID: frontmostAppBundleID
+                )
 
                 ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 

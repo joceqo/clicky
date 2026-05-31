@@ -28,6 +28,13 @@ final class NotchWindowManager: NSObject {
     private var isShown = false
     private var hoverCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
+    private var dockCancellable: AnyCancellable?
+
+    /// True when the notch is currently on screen ONLY because the buddy is
+    /// docked (it "lives in the notch" while docked). When the user undocks we
+    /// hide the notch only if it was shown for this reason — so we never fight a
+    /// notch the user opened manually (e.g. via `toggle()`/`show()`).
+    private var shownForDock = false
 
     // MARK: - Response-driven presentation state
 
@@ -86,6 +93,36 @@ final class NotchWindowManager: NSObject {
             .sink { [weak self] state in
                 self?.handleVoiceState(state)
             }
+
+        // When the buddy docks, it "lives in the notch": present the compact pill
+        // (which now reflects voice state). When it undocks, hide the notch again
+        // — but only if WE showed it for docking, so we don't close a panel the
+        // user opened manually.
+        dockCancellable = companionManager.$isCursorDocked
+            .removeDuplicates()
+            .sink { [weak self] docked in
+                self?.handleDockChange(docked)
+            }
+
+        // Seed the initial docked state (the buddy may launch already docked).
+        handleDockChange(companionManager.isCursorDocked)
+    }
+
+    /// Shows the notch when docked / hides it when undocked (only if it was shown
+    /// for docking). See `shownForDock`.
+    private func handleDockChange(_ docked: Bool) {
+        if docked {
+            if !isShown {
+                shownForDock = true
+                show()
+            }
+        } else if shownForDock {
+            shownForDock = false
+            // Don't yank the notch out from under an active response read-along.
+            if !isRespondingPresentation {
+                hide()
+            }
+        }
     }
 
     /// `true` when the buddy is actively speaking a response we should render.
@@ -121,6 +158,14 @@ final class NotchWindowManager: NSObject {
         restoreTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: self?.restoreGraceDelay ?? .milliseconds(600))
             guard let self, !Task.isCancelled, !self.isRespondingPresentation else { return }
+            // If the buddy was undocked mid-response, the notch was only present
+            // because of docking — hide it now that the response is done.
+            if self.shownForDock, self.companionManager?.isCursorDocked == false {
+                self.shownForDock = false
+                self.isShown = false
+                await self.notch?.hide()
+                return
+            }
             switch self.presentationBeforeResponse {
             case .hidden:
                 self.isShown = false
@@ -169,7 +214,7 @@ final class NotchWindowManager: NSObject {
                 AnyView(NotchExpandedContent(companionManager: companionManager))
             },
             compactLeading: {
-                AnyView(NotchCompactBuddy())
+                AnyView(NotchCompactBuddy(companionManager: companionManager))
             }
         )
         notch = dynamicNotch
@@ -229,15 +274,36 @@ final class NotchWindowManager: NSObject {
     }
 }
 
-/// The compact (collapsed) notch content: the buddy's little triangle, shown as
-/// a Dynamic-Island pill in the notch. Uses the shared `NotchBuddyGlyph` so the
-/// triangle is visually continuous with the expanded panel's header glyph (see
-/// NotchBuddyGlyph.swift / NotchRootView) across the compact → expanded morph.
+/// The compact (collapsed) notch content shown as a Dynamic-Island pill in the
+/// notch. Reflects the live voice state so a DOCKED buddy (which has no floating
+/// desktop cursor) still gives feedback during a voice interaction:
+///   • `.listening`  → a small waveform (reused `BlueCursorWaveformView`)
+///   • `.processing` → a small spinner (reused `BlueCursorSpinnerView`)
+///   • `.idle` / `.responding` / default → the shared `NotchBuddyGlyph` triangle
+///     (visually continuous with the expanded panel header across the morph).
+/// While `.responding`, the notch is force-expanded to the read-along by
+/// `handleVoiceState`, so the compact content stays the triangle here (no
+/// double-up). The waveform/spinner are the SAME structs the floating cursor
+/// uses, kept tiny here so they fit the physical notch pill.
 private struct NotchCompactBuddy: View {
+    @ObservedObject var companionManager: CompanionManager
+
     var body: some View {
-        NotchBuddyGlyph()
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
+        Group {
+            switch companionManager.voiceState {
+            case .listening:
+                BlueCursorWaveformView(audioPowerLevel: companionManager.currentAudioPowerLevel)
+            case .processing:
+                BlueCursorSpinnerView()
+            case .idle, .responding:
+                NotchBuddyGlyph()
+            }
+        }
+        // Keep a stable, compact pill footprint regardless of which indicator is
+        // showing so the notch doesn't jump as the voice state changes.
+        .frame(width: 18, height: 14)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
     }
 }
 
