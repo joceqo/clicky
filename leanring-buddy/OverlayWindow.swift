@@ -909,7 +909,9 @@ struct BlueCursorView: View {
 
 /// A small blue waveform that replaces the triangle cursor while
 /// the user is holding the push-to-talk shortcut and speaking.
-private struct BlueCursorWaveformView: View {
+/// Reused by the compact notch pill (NotchCompactBuddy) when docked, so it is
+/// not `private`.
+struct BlueCursorWaveformView: View {
     let audioPowerLevel: CGFloat
 
     @AppStorage(buddyCursorColorKey) private var buddyCursorColorRaw: String = BuddyCursorColor.blue.rawValue
@@ -952,7 +954,9 @@ private struct BlueCursorWaveformView: View {
 
 /// A small blue spinning indicator that replaces the triangle cursor
 /// while the AI is processing a voice input.
-private struct BlueCursorSpinnerView: View {
+/// Reused by the compact notch pill (NotchCompactBuddy) when docked, so it is
+/// not `private`.
+struct BlueCursorSpinnerView: View {
     @State private var isSpinning = false
 
     @AppStorage(buddyCursorColorKey) private var buddyCursorColorRaw: String = BuddyCursorColor.blue.rawValue
